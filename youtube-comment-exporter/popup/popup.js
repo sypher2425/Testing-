@@ -22,7 +22,7 @@ const el = {
   formatBtns: document.querySelectorAll('.format-btn'),
 };
 
-let selectedFormat = 'csv';
+let selectedFormat = 'txt';
 let activeTabId = null;
 let exportedData = null;
 let exportedTitle = 'youtube-comments';
@@ -146,28 +146,30 @@ function sanitizeFilename(name) {
     || 'youtube-comments';
 }
 
-/** Convert comment array to CSV string. */
-function toCSV(comments) {
-  const headers = [
-    'Username', 'Comment', 'Time', 'Likes', 'Replies',
-    'Hearted', 'Pinned', 'Verified', 'Creator', 'CommentURL', 'VideoURL'
-  ];
+/** Convert comment array to a human-readable plain-text block. */
+function toTXT(comments) {
+  const DIVIDER = '-'.repeat(40);
 
-  const escape = (v) => {
-    if (v == null) return '';
-    const s = String(v);
-    if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-      return `"${s.replace(/"/g, '""')}"`;
+  return comments.map(c => {
+    // Build the header line: [author] · time · N likes (+ M replies)
+    const parts = [`[${c.username || 'Unknown'}]`];
+    if (c.time) parts.push(c.time);
+    if (c.likes > 0) {
+      const likeStr = c.replyCount > 0
+        ? `${c.likes} likes (+ ${c.replyCount} replies)`
+        : `${c.likes} likes`;
+      parts.push(likeStr);
+    } else if (c.replyCount > 0) {
+      parts.push(`+ ${c.replyCount} replies`);
     }
-    return s;
-  };
+    const header = parts.join(' · ');
 
-  const rows = comments.map(c => [
-    c.username, c.text, c.time, c.likes, c.replyCount,
-    c.hearted, c.pinned, c.verified, c.isCreator, c.commentUrl, c.videoUrl
-  ].map(escape).join(','));
-
-  return [headers.join(','), ...rows].join('\r\n');
+    const lines = [header];
+    if (c.text) lines.push(c.text);
+    if (c.commentUrl) lines.push(`link: ${c.commentUrl}`);
+    lines.push(DIVIDER);
+    return lines.join('\n');
+  }).join('\n');
 }
 
 /** Trigger a browser download of the export file. */
@@ -239,9 +241,9 @@ el.downloadBtn.addEventListener('click', () => {
     );
   } else {
     triggerDownload(
-      toCSV(exportedData),
-      `${base}-comments.csv`,
-      'text/csv;charset=utf-8;'
+      toTXT(exportedData),
+      `${base}-comments.txt`,
+      'text/plain;charset=utf-8;'
     );
   }
 });

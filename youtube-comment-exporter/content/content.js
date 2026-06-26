@@ -132,16 +132,31 @@
     return false;
   });
 
-  // Keep progress updated as comments load during scrolling
-  // (MutationObserver-driven harvest so the counter stays live)
+  // Keep progress updated as comments load during scrolling.
+  //
+  // Throttled to at most one harvest per second: CommentParser.parseAll()
+  // walks the entire ytd-comment-thread-renderer list on every call, so at
+  // 1000 comments with dozens of mutation batches per second the naive
+  // approach is O(N × batches) work. The throttle coalesces all mutations
+  // within a 1s window into a single parseAll pass. Correctness is
+  // guaranteed by the final harvestComments() call after scrollUntil()
+  // finishes, which catches anything that landed in the last window.
+  let harvestScheduled = false;
+
   const liveObserver = new MutationObserver(() => {
     const snap = ProgressManager.getSnapshot();
-    if (!snap.running) return;
-    harvestComments();
-    ProgressManager.update(
-      commentStore.size,
-      `Collecting comments... ${commentStore.size.toLocaleString()} / ${snap.total.toLocaleString()}`
-    );
+    if (!snap.running || harvestScheduled) return;
+    harvestScheduled = true;
+    setTimeout(() => {
+      harvestScheduled = false;
+      if (!ProgressManager.getSnapshot().running) return;
+      harvestComments();
+      const { total } = ProgressManager.getSnapshot();
+      ProgressManager.update(
+        commentStore.size,
+        `Collecting comments... ${commentStore.size.toLocaleString()} / ${total.toLocaleString()}`
+      );
+    }, 1000);
   });
 
   // Start observing once the comment container appears.
