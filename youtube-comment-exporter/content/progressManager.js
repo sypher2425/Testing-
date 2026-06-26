@@ -5,7 +5,7 @@
  * Designed to be polled by the popup every second via chrome.runtime messages.
  */
 
-const ProgressManager = (() => {
+window.ProgressManager = (() => {
   const state = {
     running: false,
     done: false,

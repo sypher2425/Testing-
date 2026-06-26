@@ -8,7 +8,7 @@
  * that appends batches of comment renderers.
  */
 
-const ScrollManager = (() => {
+window.ScrollManager = (() => {
   // How far below the current scroll position we aim each scroll step.
   const SCROLL_STEP_PX = 400;
 

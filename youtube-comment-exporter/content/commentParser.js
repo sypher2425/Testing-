@@ -7,7 +7,7 @@
  * We prefer these over opaque class names that change with every deployment.
  */
 
-const CommentParser = (() => {
+window.CommentParser = (() => {
   /** Return the visible text content of the first matching descendant. */
   function text(root, selector) {
     const el = root.querySelector(selector);
