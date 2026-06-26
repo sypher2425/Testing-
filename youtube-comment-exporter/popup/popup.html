@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube Comment Exporter</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="header-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+          <path d="M23 7s-.3-2-1.2-2.8c-1.1-1.2-2.4-1.2-3-1.3C16.2 2.8 12 2.8 12 2.8s-4.2 0-6.8.1C4.6 3 3.3 3 2.2 4.2 1.3 5 1 7 1 7S.7 9.3.7 11.5v2.1C.7 15.8 1 18 1 18s.3 2 1.2 2.8c1.1 1.2 2.6 1.1 3.3 1.2C7.5 22.2 12 22.2 12 22.2s4.2 0 6.8-.2c.6-.1 1.9-.1 3-1.2C22.7 20 23 18 23 18s.3-2.2.3-4.4v-2.1C23.3 9.3 23 7 23 7z" fill="#FF0000"/>
+          <path d="M10 15.5V8.5l6 3.5-6 3.5z" fill="white"/>
+        </svg>
+      </div>
+      <h1 class="header-title">Comment Exporter</h1>
+    </header>
+
+    <!-- Not on YouTube watch page -->
+    <div id="not-youtube" class="section hidden">
+      <div class="warning-box">
+        <svg class="warning-icon" width="20" height="20" viewBox="0 0 24 24" fill="none">
+          <path d="M12 2L1 21h22L12 2zm0 3.5L20.5 19h-17L12 5.5zM11 10v4h2v-4h-2zm0 6v2h2v-2h-2z" fill="#f59e0b"/>
+        </svg>
+        <p>This extension only works on YouTube video pages.</p>
+      </div>
+      <p class="hint">Navigate to a YouTube video and click the extension again.</p>
+    </div>
+
+    <!-- Main export UI -->
+    <div id="main-ui" class="section hidden">
+      <div class="form-group">
+        <label for="export-limit" class="label">Export Limit</label>
+        <div class="select-wrapper">
+          <select id="export-limit" class="select">
+            <option value="100">100 comments</option>
+            <option value="250">250 comments</option>
+            <option value="500" selected>500 comments</option>
+            <option value="750">750 comments</option>
+            <option value="1000">1,000 comments</option>
+          </select>
+          <span class="select-arrow">&#9660;</span>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="label">Export Format</label>
+        <div class="format-buttons">
+          <button id="format-csv" class="format-btn active" data-format="csv">CSV</button>
+          <button id="format-json" class="format-btn" data-format="json">JSON</button>
+        </div>
+      </div>
+
+      <div id="progress-section" class="progress-section hidden">
+        <div class="progress-bar-wrapper">
+          <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+        </div>
+        <div class="progress-info">
+          <span id="status-text" class="status-text">Waiting...</span>
+          <span id="eta-text" class="eta-text"></span>
+        </div>
+      </div>
+
+      <div class="button-group">
+        <button id="start-btn" class="btn btn-primary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M8 5v14l11-7L8 5z"/>
+          </svg>
+          Start Export
+        </button>
+        <button id="cancel-btn" class="btn btn-secondary hidden">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M6 6h12v12H6V6z"/>
+          </svg>
+          Cancel
+        </button>
+      </div>
+
+      <div id="result-section" class="result-section hidden">
+        <div id="result-message" class="result-message"></div>
+        <div class="download-buttons hidden" id="download-buttons">
+          <button id="download-btn" class="btn btn-success">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+            </svg>
+            Download
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loading state -->
+    <div id="loading-ui" class="section loading-ui">
+      <div class="spinner"></div>
+      <p class="loading-text">Initializing...</p>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
