@@ -39,11 +39,15 @@ window.ScrollManager = (() => {
     aborted = true;
   }
 
-  // Yield one rAF tick. After a synchronous scroll position change, this
-  // guarantees the browser has processed IntersectionObserver thresholds
-  // and layout before we do anything else.
+  // Yield to allow IntersectionObserver callbacks to fire after a scroll.
+  // Uses setTimeout rather than requestAnimationFrame: rAF is fully suspended
+  // in background tabs, which would stall the entire scroll loop if the user
+  // switches away from the YouTube tab mid-export. setTimeout is throttled
+  // to ~1s when backgrounded (browser minimum timer interval), but NOT fully
+  // paused — the loop keeps progressing. Note: background-tab throttling
+  // still exists at the browser level; this only avoids a complete freeze.
   function nextFrame() {
-    return new Promise(r => requestAnimationFrame(r));
+    return new Promise(r => setTimeout(r, 50));
   }
 
   /**

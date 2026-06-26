@@ -151,22 +151,19 @@ function toTXT(comments) {
   const DIVIDER = '-'.repeat(40);
 
   return comments.map(c => {
-    // Build the header line: [author] · time · N likes (+ M replies)
-    const parts = [`[${c.username || 'Unknown'}]`];
-    if (c.time) parts.push(c.time);
-    if (c.likes > 0) {
-      const likeStr = c.replyCount > 0
-        ? `${c.likes} likes (+ ${c.replyCount} replies)`
-        : `${c.likes} likes`;
-      parts.push(likeStr);
-    } else if (c.replyCount > 0) {
-      parts.push(`+ ${c.replyCount} replies`);
-    }
-    const header = parts.join(' · ');
+    const lines = [];
 
-    const lines = [header];
+    // Metadata line: omit entirely when there are no likes or replies to show
+    if (c.likes > 0 || c.replyCount > 0) {
+      const meta = c.likes > 0
+        ? (c.replyCount > 0
+            ? `${c.likes} likes (+ ${c.replyCount} replies)`
+            : `${c.likes} likes`)
+        : `+ ${c.replyCount} replies`;
+      lines.push(meta);
+    }
+
     if (c.text) lines.push(c.text);
-    if (c.commentUrl) lines.push(`link: ${c.commentUrl}`);
     lines.push(DIVIDER);
     return lines.join('\n');
   }).join('\n');
