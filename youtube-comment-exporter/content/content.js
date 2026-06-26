@@ -144,13 +144,14 @@
     );
   });
 
-  // Start observing once the comment container appears
+  // Start observing once the comment container appears.
+  // subtree:true is required on the bodyObserver because ytd-comments#comments
+  // is nested several levels deep inside ytd-app, not a direct child of body.
   function attachLiveObserver() {
     const container = document.querySelector('ytd-comments#comments');
     if (container) {
       liveObserver.observe(container, { childList: true, subtree: true });
     } else {
-      // Retry once the element is added to the DOM
       const bodyObserver = new MutationObserver((_m, obs) => {
         const c = document.querySelector('ytd-comments#comments');
         if (c) {
@@ -158,7 +159,7 @@
           liveObserver.observe(c, { childList: true, subtree: true });
         }
       });
-      bodyObserver.observe(document.body, { childList: true, subtree: false });
+      bodyObserver.observe(document.body, { childList: true, subtree: true });
     }
   }
 
