@@ -16,7 +16,9 @@ window.CommentParser = (() => {
 
   /** Full comment text from #content-text, with whitespace normalised. */
   function extractCommentText(commentEl) {
-    const el = commentEl.querySelector('#content-text');
+    const el =
+      commentEl.querySelector('#content-text') ||
+      commentEl.querySelector('yt-attributed-string');
     if (!el) return '';
     return el.textContent.replace(/\s+/g, ' ').trim();
   }
@@ -31,6 +33,30 @@ window.CommentParser = (() => {
     const n = parseFloat(m[1]);
     const mult = { k: 1e3, K: 1e3, m: 1e6, M: 1e6, b: 1e9, B: 1e9 }[m[2]] || 1;
     return Math.round(n * mult);
+  }
+
+  /**
+   * Extract like count from a comment element.
+   * Tries #vote-count-middle first (classic renderer), then falls back to
+   * scanning all elements whose aria-label contains "X likes" (new model).
+   * Warns when no vote-count element of any kind is found, so we can
+   * distinguish "genuinely zero likes" from "selector miss".
+   */
+  function extractLikes(commentEl) {
+    const voteEl = commentEl.querySelector('#vote-count-middle');
+    if (voteEl) return parseLikes(voteEl.textContent);
+
+    // aria-label fallback for ytd-comment-view-model and future structures
+    const ariaPattern = /(\d[\d,.]*\s*[KkMmBb]?)\s+likes?/i;
+    const candidates = commentEl.querySelectorAll('[aria-label]');
+    for (const el of candidates) {
+      const m = el.getAttribute('aria-label').match(ariaPattern);
+      if (m) return parseLikes(m[1]);
+    }
+
+    // Nothing found — warn so we know the selector is missing, not the likes
+    console.warn('[YT-Exporter] likes: no vote-count element found', commentEl.tagName, commentEl.outerHTML.slice(0, 200));
+    return 0;
   }
 
   /** Parse reply count from the "Show N replies" button text. */
@@ -67,14 +93,33 @@ window.CommentParser = (() => {
 
   /**
    * Parse one ytd-comment-thread-renderer into { text, likes, replyCount, _key }.
-   * Returns null if the element hasn't fully hydrated yet (#comment missing).
+   * Returns null if the element hasn't hydrated at all yet.
+   *
+   * YouTube uses two DOM structures:
+   *   Classic: ytd-comment-thread-renderer > #comment (ytd-comment-renderer)
+   *   New:     ytd-comment-thread-renderer > ytd-comment-view-model
+   * We try #comment first, then fall back to ytd-comment-view-model.
+   * When neither is present the element is unhydrated — return null.
    */
   function parseThread(threadEl) {
-    const commentEl = threadEl.querySelector('#comment');
-    if (!commentEl) return null;
+    let commentEl = threadEl.querySelector('#comment');
+
+    if (!commentEl) {
+      commentEl = threadEl.querySelector('ytd-comment-view-model');
+      if (commentEl) {
+        // Log the alternate structure once so we can verify the selectors
+        console.warn(
+          '[YT-Exporter] parseThread: #comment absent, using ytd-comment-view-model',
+          threadEl.outerHTML.slice(0, 300)
+        );
+      } else {
+        // Completely unhydrated — will be retried by the safety-net harvestAll()
+        return null;
+      }
+    }
 
     const commentText = extractCommentText(commentEl);
-    const likes = parseLikes(text(commentEl, '#vote-count-middle'));
+    const likes = extractLikes(commentEl);
     const replyCount = parseReplyCount(threadEl);
     const _key = makeDedupKey(threadEl, commentText, likes);
 

@@ -1,30 +1,12 @@
 /**
  * scrollManager.js
  * Drives the scroll loop that progressively reveals YouTube comments.
- *
- * Design decisions explained inline — these are non-obvious and wrong
- * defaults are the primary reason the extension stalls at ~20 comments.
  */
 
 window.ScrollManager = (() => {
-  // How long to wait for new comment threads after each scroll trigger.
-  // YouTube's continuation request + Polymer hydration can take 10-12s on
-  // a slow connection; 15s gives a comfortable margin without being infinite.
   const STALL_TIMEOUT_MS = 15000;
-
-  // How many consecutive timeouts before we conclude there are no more comments.
-  // 5 × 15s = 75s of patience. Better to over-wait than stop early.
   const MAX_STALLS = 5;
-
-  // Brief pause after firing a scroll-to-trigger so YouTube's
-  // IntersectionObserver callback runs before we start timing the wait.
-  // 300ms is enough for a single continuation request to start; we are NOT
-  // waiting for the response here — that is what STALL_TIMEOUT_MS is for.
   const POST_SCROLL_SETTLE_MS = 300;
-
-  // Interval for the polling safety net inside waitForCountGrowth.
-  // MutationObserver can miss Polymer bulk-replace operations, so we poll
-  // as a fallback. 500ms is imperceptible lag but covers the blind spot.
   const POLL_INTERVAL_MS = 500;
 
   let stallCount = 0;
@@ -39,28 +21,50 @@ window.ScrollManager = (() => {
     aborted = true;
   }
 
-  // Yield to allow IntersectionObserver callbacks to fire after a scroll.
-  // Uses setTimeout rather than requestAnimationFrame: rAF is fully suspended
-  // in background tabs, which would stall the entire scroll loop if the user
-  // switches away from the YouTube tab mid-export. setTimeout is throttled
-  // to ~1s when backgrounded (browser minimum timer interval), but NOT fully
-  // paused — the loop keeps progressing. Note: background-tab throttling
-  // still exists at the browser level; this only avoids a complete freeze.
+  // setTimeout instead of rAF: rAF is fully paused in background tabs.
+  // setTimeout is throttled (~1s) but not frozen — keeps the loop alive.
   function nextFrame() {
     return new Promise(r => setTimeout(r, 50));
   }
 
   /**
-   * Find the element whose visibility YouTube's IntersectionObserver uses
-   * to decide when to fire the next continuation (batch) request.
+   * Dispatch a synthetic WheelEvent on multiple targets after a programmatic
+   * scroll. YouTube's comment loader may gate continuation batches on
+   * receiving wheel input rather than purely on IntersectionObserver
+   * visibility. We dispatch on the trigger element, the comments container,
+   * and document.scrollingElement to cover whichever path YouTube listens on.
    *
-   * Priority order:
-   *   1. ytd-continuation-item-renderer — the explicit "load more" sentinel
-   *      that YouTube places at the bottom of each rendered batch.
-   *   2. The last ytd-comment-thread-renderer — close enough to trigger the
-   *      IntersectionObserver if the continuation item hasn't appeared yet.
-   *   3. null — caller falls back to a raw window.scrollBy.
+   * Note: synthetically dispatched events have isTrusted=false. If YouTube
+   * checks isTrusted internally this will have no effect — the stall console
+   * logs will make that visible (count won't grow despite wheel events).
    */
+  function dispatchWheelEvents(triggerEl) {
+    // Use the element's centre as the event coordinate so any hit-test
+    // inside YouTube's listener will resolve to the right element.
+    const rect = triggerEl.getBoundingClientRect();
+    const cx = Math.round(rect.left + rect.width / 2);
+    const cy = Math.round(rect.top + rect.height / 2);
+
+    const opts = {
+      deltaY: 120,
+      deltaMode: 0,   // DOM_DELTA_PIXEL
+      clientX: cx,
+      clientY: cy,
+      bubbles: true,
+      cancelable: true,
+      composed: true, // crosses shadow-DOM boundaries
+    };
+
+    triggerEl.dispatchEvent(new WheelEvent('wheel', opts));
+
+    const commentsEl = document.querySelector('ytd-comments#comments');
+    if (commentsEl) commentsEl.dispatchEvent(new WheelEvent('wheel', opts));
+
+    // scrollingElement is <html> on YouTube — the primary scroll container
+    const scrollRoot = document.scrollingElement || document.documentElement;
+    scrollRoot.dispatchEvent(new WheelEvent('wheel', opts));
+  }
+
   function findTriggerEl() {
     const continuation = document.querySelector(
       'ytd-comments#comments ytd-continuation-item-renderer'
@@ -71,40 +75,26 @@ window.ScrollManager = (() => {
     return threads.length ? threads[threads.length - 1] : null;
   }
 
-  /**
-   * Scroll so that YouTube's IntersectionObserver fires for the next batch.
-   *
-   * We use behavior:'instant' (synchronous position update) rather than
-   * behavior:'smooth' (async animation) for two reasons:
-   *   a) Smooth scrolling resolves our Promise before the final position is
-   *      reached, so the IO observer never sees the target viewport position.
-   *   b) Instant scrolling lets us yield one rAF and have a guaranteed,
-   *      stable position for the IO callback to evaluate.
-   */
   async function scrollToTrigger() {
     const el = findTriggerEl();
     if (el) {
       el.scrollIntoView({ behavior: 'instant', block: 'center' });
+      // Dispatch synthetic wheel events immediately after repositioning.
+      // If YouTube's loader requires real wheel input to issue the next
+      // continuation request, this is where that signal gets sent.
+      dispatchWheelEvents(el);
     } else {
-      // No target found yet — jump forward aggressively
       window.scrollBy({ top: 1500, behavior: 'instant' });
     }
 
-    // Let the IntersectionObserver callbacks run before we start the timer
     await nextFrame();
     await new Promise(r => setTimeout(r, POST_SCROLL_SETTLE_MS));
   }
 
-  /**
-   * Scroll the page down to where the comments container begins.
-   * YouTube does not render ytd-comments#comments until it enters the viewport,
-   * so we scroll slowly until the element appears.
-   */
   async function scrollToComments() {
     const container = document.querySelector('ytd-comments#comments');
     if (container) {
       container.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      // Give Polymer time to hydrate the comment section skeleton
       await new Promise(r => setTimeout(r, 1500));
       return true;
     }
@@ -118,14 +108,6 @@ window.ScrollManager = (() => {
     return false;
   }
 
-  /**
-   * Main loop: scroll, wait for growth, repeat until done or stalled.
-   *
-   * @param {() => number}   getCount    live DOM count of comment threads
-   * @param {number}         targetCount stop when this many are visible
-   * @param {() => boolean}  isDone      external abort / limit check
-   * @returns {Promise<'done' | 'stalled' | 'aborted'>}
-   */
   async function scrollUntil(getCount, targetCount, isDone) {
     stallCount = 0;
 
@@ -141,9 +123,34 @@ window.ScrollManager = (() => {
 
       if (!grew) {
         stallCount++;
+
+        // ── Stall diagnostic ──────────────────────────────────────────────
+        // This tells us two things:
+        //   1. Whether YouTube's sentinel element even exists (if absent,
+        //      YouTube may believe it has already served all comments).
+        //   2. Whether the sentinel has an active loading spinner inside it
+        //      (if present, YouTube knows there are more comments and is
+        //      just waiting for scroll/wheel input — the synthetic events
+        //      should eventually unblock it; if absent, continuation may
+        //      have already been exhausted server-side).
+        const contEl = document.querySelector(
+          'ytd-comments#comments ytd-continuation-item-renderer'
+        );
+        const hasSpinner = contEl
+          ? !!(contEl.querySelector(
+              'paper-spinner, ytd-spinner, tp-yt-paper-spinner, ' +
+              '[class*="spinner"], [class*="loading"]'
+            ))
+          : false;
+        console.log(
+          `[YT-Exporter] Stall ${stallCount}/${MAX_STALLS}: ` +
+          `${getCount()} comments rendered | ` +
+          `continuation-item: ${contEl ? 'PRESENT' : 'absent'} | ` +
+          `spinner: ${hasSpinner ? 'ACTIVE' : 'none'}`
+        );
+        // ── End diagnostic ────────────────────────────────────────────────
+
         if (stallCount >= MAX_STALLS) return 'stalled';
-        // On a stall, scroll a bit further before retrying — the trigger
-        // element may have moved below the viewport as Polymer reflowed.
         window.scrollBy({ top: 400, behavior: 'instant' });
         await nextFrame();
       } else {
@@ -156,20 +163,6 @@ window.ScrollManager = (() => {
     return aborted ? 'aborted' : 'done';
   }
 
-  /**
-   * Wait until getCount() exceeds baseline, or timeoutMs elapses.
-   *
-   * Two complementary mechanisms:
-   *   - MutationObserver: fast path, fires within a frame of DOM change
-   *   - setInterval (POLL_INTERVAL_MS): safety net for Polymer bulk-replaces
-   *     that swap entire subtrees without firing childList on the parent we
-   *     happen to be watching
-   *
-   * The watch target is re-queried on every call (not cached across calls)
-   * to avoid the stale-reference problem: Polymer can detach and re-attach
-   * the #contents element between batches, making a cached reference point
-   * at a dead node that never receives mutations.
-   */
   function waitForCountGrowth(getCount, baseline, timeoutMs) {
     return new Promise(resolve => {
       if (getCount() > baseline) { resolve(true); return; }
@@ -184,7 +177,6 @@ window.ScrollManager = (() => {
         resolve(result);
       }
 
-      // Re-query target now so we always watch a live node
       const watchTarget =
         document.querySelector(
           'ytd-comments#comments ytd-item-section-renderer #contents'
