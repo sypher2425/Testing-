@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "YouTube Comment Exporter",
-  "version": "1.0.0",
-  "description": "Export comments from YouTube videos to CSV or JSON without requiring API access.",
+  "name": "Comment Exporter",
+  "version": "1.1.0",
+  "description": "Export comments from YouTube videos and Instagram posts to TXT or JSON without requiring API access.",
   "permissions": [
     "activeTab",
     "scripting",
     "storage"
   ],
   "host_permissions": [
-    "https://www.youtube.com/*"
+    "https://www.youtube.com/*",
+    "https://www.instagram.com/*"
   ],
   "background": {
     "service_worker": "background/background.js"
@@ -22,6 +23,17 @@
         "content/commentParser.js",
         "content/progressManager.js",
         "content/content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.instagram.com/p/*",
+        "https://www.instagram.com/reel/*"
+      ],
+      "js": [
+        "content/progressManager.js",
+        "content/igDiagnostic.js"
       ],
       "run_at": "document_idle"
     }
