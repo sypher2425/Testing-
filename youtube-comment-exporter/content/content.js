@@ -12,6 +12,7 @@
   window.__ytCommentExporterLoaded = true;
 
   let cancelRequested = false;
+  let finishRequested = false;
 
   // Single source of truth: keyed by _key from CommentParser.
   // Stores full objects including _key; _key is stripped before export.
@@ -71,6 +72,7 @@
 
   async function runExport(limit) {
     cancelRequested = false;
+    finishRequested = false;
     commentStore.clear();
     ScrollManager.reset();
 
@@ -92,7 +94,7 @@
 
     ProgressManager.update(0, 'Loading comments...');
 
-    const isDone = () => cancelRequested || commentStore.size >= limit;
+    const isDone = () => cancelRequested || finishRequested || commentStore.size >= limit;
     const result = await ScrollManager.scrollUntil(getRenderedCount, limit, isDone);
 
     if (cancelRequested) { ProgressManager.cancel(); return; }
@@ -124,6 +126,12 @@
       cancelRequested = true;
       ScrollManager.abort();
       ProgressManager.cancel();
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (message.action === 'finishExport') {
+      finishRequested = true;
+      ScrollManager.abort();
       sendResponse({ ok: true });
       return false;
     }

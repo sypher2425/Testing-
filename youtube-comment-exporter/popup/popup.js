@@ -11,6 +11,7 @@ const el = {
   exportLimit: document.getElementById('export-limit'),
   startBtn: document.getElementById('start-btn'),
   cancelBtn: document.getElementById('cancel-btn'),
+  finishBtn: document.getElementById('finish-btn'),
   progressSection: document.getElementById('progress-section'),
   progressBar: document.getElementById('progress-bar'),
   statusText: document.getElementById('status-text'),
@@ -53,13 +54,14 @@ function updateProgress(collected, total, status, eta) {
   el.etaText.textContent = eta || '';
 }
 
-/** Switch into "exporting" mode: show progress, hide start, show cancel. */
+/** Switch into "exporting" mode: show progress, hide start, show cancel+done. */
 function enterExportingState() {
   el.progressSection.classList.remove('hidden');
   el.resultSection.classList.add('hidden');
   el.downloadButtons.classList.add('hidden');
   el.startBtn.classList.add('hidden');
   el.cancelBtn.classList.remove('hidden');
+  el.finishBtn.classList.remove('hidden');
   el.startBtn.disabled = true;
   updateProgress(0, parseInt(el.exportLimit.value, 10), 'Starting export...', '');
 }
@@ -68,6 +70,7 @@ function enterExportingState() {
 function enterIdleState() {
   el.startBtn.classList.remove('hidden');
   el.cancelBtn.classList.add('hidden');
+  el.finishBtn.classList.add('hidden');
   el.startBtn.disabled = false;
   stopPolling();
 }
@@ -220,6 +223,16 @@ el.cancelBtn.addEventListener('click', async () => {
   } catch { /* ignore */ }
   updateProgress(0, 0, 'Cancelled.', '');
   enterIdleState();
+});
+
+el.finishBtn.addEventListener('click', async () => {
+  if (!activeTabId) return;
+  try {
+    await chrome.tabs.sendMessage(activeTabId, { action: 'finishExport' });
+  } catch { /* ignore */ }
+  // Keep polling — the content script will run harvestAll() and call
+  // ProgressManager.complete(), which the existing resp.done branch in
+  // startPolling() will pick up and route to handleExportComplete().
 });
 
 el.downloadBtn.addEventListener('click', () => {

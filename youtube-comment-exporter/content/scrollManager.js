@@ -191,7 +191,10 @@ window.ScrollManager = (() => {
 
       const pollId = setInterval(() => {
         if (getCount() > baseline) finish(true);
-      }, POLL_INTERVAL_MS);
+        // Exit immediately if abort() was called (e.g. "Done" or "Cancel" clicked)
+        // rather than blocking for the remaining stall timeout (up to 15 s).
+        else if (aborted) finish(false);
+      }, 200);
 
       const timerId = setTimeout(() => finish(false), timeoutMs);
     });
