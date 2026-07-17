@@ -142,6 +142,55 @@ def test_extract_frames_interval_mode(tmp_path):
     assert frames[1]["image"] == "0001.000.jpg"
 
 
+def test_extract_frames_skips_one_bad_frame_instead_of_failing_job(tmp_path):
+    """A single frame that fails all retry attempts should be skipped, not
+    take down the whole job — this is the 'safety measure' regression test
+    for the "Failed to extract frame at Xs" bug."""
+    from app.pipeline.steps.extract_frames import ExtractFramesStep
+
+    ctx, logs, shared_state = make_ctx(
+        tmp_path, options={"mode": "interval", "interval_ms": 1000, "frame_format": "jpeg", "frame_max_dim": 1280}
+    )
+    ctx.shared["video"] = {"duration_seconds": 4.0, "fps": 25.0, "has_audio": False}
+    ctx.shared["source_relative_path"] = ctx.job_relative("source", "video.mp4")
+
+    # Selections land at 0.0, 1.0, 2.0, 3.0 — make every attempt for t=2.0 fail
+    # (all 3 retries), while every other timestamp succeeds on the first try.
+    def fake_extract(source, output_path, timestamp, **kwargs):
+        if abs(timestamp - 2.0) < 0.3:
+            raise FFmpegError("boom", cmd=["ffmpeg"], returncode=1, stderr="no frame")
+        with open(output_path, "wb") as f:
+            f.write(b"jpegbytes")
+
+    with patch("app.pipeline.steps.extract_frames.extract_frame_at", side_effect=fake_extract):
+        ExtractFramesStep().run(ctx)
+
+    # 4 selected, 1 unrecoverable -> 3 survive, job did not raise.
+    assert ctx.shared["frame_count"] == 3
+    assert shared_state["frame_count"] == 3
+    assert any("skipped" in msg.lower() or "skipping" in msg.lower() for _, msg in logs)
+    # Remaining frames are renumbered contiguously.
+    assert [f["frame"] for f in ctx.shared["frames"]] == [0, 1, 2]
+
+
+def test_extract_frames_raises_when_every_frame_fails(tmp_path):
+    from app.pipeline.steps.extract_frames import ExtractFramesStep
+
+    ctx, _, _ = make_ctx(
+        tmp_path, options={"mode": "interval", "interval_ms": 1000, "frame_format": "jpeg", "frame_max_dim": 1280}
+    )
+    ctx.shared["video"] = {"duration_seconds": 2.0, "fps": 25.0, "has_audio": False}
+    ctx.shared["source_relative_path"] = ctx.job_relative("source", "video.mp4")
+
+    with patch(
+        "app.pipeline.steps.extract_frames.extract_frame_at",
+        side_effect=FFmpegError("boom", cmd=["ffmpeg"], returncode=1, stderr="no frame"),
+    ):
+        with pytest.raises(PipelineFailedError) as exc_info:
+            ExtractFramesStep().run(ctx)
+    assert exc_info.value.code == "frame_extraction_failed"
+
+
 def test_extract_frames_adaptive_mode_uses_scene_detection(tmp_path):
     from app.pipeline.steps import extract_frames as extract_frames_module
 

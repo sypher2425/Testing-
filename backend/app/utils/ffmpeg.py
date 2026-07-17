@@ -6,6 +6,7 @@ hung or failing process always turns into a typed, user-readable error
 instead of a silent hang.
 """
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 
@@ -120,15 +121,26 @@ def extract_frame_at(
     quality: int = 85,
     fmt: str = "jpeg",
     timeout: int = 60,
+    accurate: bool = False,
 ) -> None:
     """Extract a single frame at timestamp_seconds, optionally downscaled to max_dim
-    on the long edge, preserving aspect ratio."""
+    on the long edge, preserving aspect ratio.
+
+    By default uses fast (keyframe-based) seeking with -ss before -i. Pass
+    accurate=True to instead seek after -i: slower (decodes from the start),
+    but frame-accurate — a useful fallback when fast seeking lands on a
+    timestamp ffmpeg can't produce a frame for (e.g. right at EOF or in a
+    file with sparse keyframes)."""
     vf_parts = []
     if max_dim:
         vf_parts.append(
             f"scale='if(gt(iw,ih),min(iw,{max_dim}),-2)':'if(gt(iw,ih),-2,min(ih,{max_dim}))'"
         )
-    cmd = ["ffmpeg", "-y", "-ss", f"{timestamp_seconds:.3f}", "-i", source_path]
+    timestamp_arg = f"{max(timestamp_seconds, 0.0):.3f}"
+    if accurate:
+        cmd = ["ffmpeg", "-y", "-i", source_path, "-ss", timestamp_arg]
+    else:
+        cmd = ["ffmpeg", "-y", "-ss", timestamp_arg, "-i", source_path]
     if vf_parts:
         cmd += ["-vf", ",".join(vf_parts)]
     cmd += ["-frames:v", "1"]
@@ -139,6 +151,16 @@ def extract_frame_at(
     if proc.returncode != 0:
         raise FFmpegError(
             f"Failed to extract frame at {timestamp_seconds:.3f}s",
+            cmd=cmd,
+            returncode=proc.returncode,
+            stderr=proc.stderr.decode(errors="replace"),
+        )
+    # ffmpeg can exit 0 while writing nothing if the seek timestamp lands at
+    # or past the last decodable frame — verify a real file actually landed.
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        raise FFmpegError(
+            f"ffmpeg exited successfully but produced no frame at {timestamp_seconds:.3f}s "
+            "(likely sought past the last decodable frame)",
             cmd=cmd,
             returncode=proc.returncode,
             stderr=proc.stderr.decode(errors="replace"),

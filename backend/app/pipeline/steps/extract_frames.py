@@ -144,33 +144,55 @@ class ExtractFramesStep(PipelineStep):
         ctx.info(f"Selected {len(selections)} frame timestamps using mode={mode}")
 
         frames_meta = []
+        failed_count = 0
         total = max(len(selections), 1)
         with tempfile.TemporaryDirectory() as tmp:
             for idx, sel in enumerate(selections):
                 ctx.check_cancel()
+                # Clamp to just before the end — the exact reported duration
+                # can be a hair past the last decodable frame.
+                safe_ts = min(sel.timestamp, max(duration - 0.05, 0.0)) if duration else sel.timestamp
                 filename = frame_filename(sel.timestamp, frame_format)
                 local_path = f"{tmp}/{filename}"
-                try:
-                    extract_frame_at(
-                        source_path,
-                        local_path,
-                        sel.timestamp,
-                        max_dim=frame_max_dim,
-                        quality=quality,
-                        fmt=frame_format,
-                        timeout=settings.FFMPEG_TIMEOUT_SECONDS,
+
+                last_error: FFmpegError | None = None
+                extracted = False
+                for attempt_ts, accurate in (
+                    (safe_ts, False),
+                    (safe_ts, True),
+                    (max(safe_ts - 0.25, 0.0), True),
+                ):
+                    try:
+                        extract_frame_at(
+                            source_path,
+                            local_path,
+                            attempt_ts,
+                            max_dim=frame_max_dim,
+                            quality=quality,
+                            fmt=frame_format,
+                            timeout=settings.FFMPEG_TIMEOUT_SECONDS,
+                            accurate=accurate,
+                        )
+                        extracted = True
+                        break
+                    except FFmpegError as exc:
+                        last_error = exc
+
+                if not extracted:
+                    failed_count += 1
+                    ctx.warning(
+                        f"Skipping frame at t={sel.timestamp:.3f}s after retries failed: "
+                        f"{last_error.message if last_error else 'unknown error'}"
                     )
-                except FFmpegError as exc:
-                    raise PipelineFailedError(
-                        "frame_extraction_failed", exc.message, exc.to_detail()
-                    ) from exc
+                    ctx.set_step_progress(self.name, round(5 + 90 * (idx + 1) / total))
+                    continue
 
                 with open(local_path, "rb") as f:
                     data = f.read()
                 ctx.storage.save_bytes(ctx.job_relative("frames", filename), data)
 
                 entry = {
-                    "frame": idx,
+                    "frame": len(frames_meta),
                     "timestamp": round(sel.timestamp, 3),
                     "image": filename,
                     "mode": mode,
@@ -180,6 +202,17 @@ class ExtractFramesStep(PipelineStep):
                 frames_meta.append(entry)
 
                 ctx.set_step_progress(self.name, round(5 + 90 * (idx + 1) / total))
+
+        if not frames_meta:
+            raise PipelineFailedError(
+                "frame_extraction_failed",
+                "Every selected frame failed to extract; no usable frames were produced.",
+            )
+        if failed_count:
+            ctx.warning(
+                f"{failed_count} of {len(selections)} selected frames could not be extracted "
+                f"and were skipped; {len(frames_meta)} frames were produced."
+            )
 
         ctx.shared["frames"] = frames_meta
         ctx.shared["frame_count"] = len(frames_meta)
