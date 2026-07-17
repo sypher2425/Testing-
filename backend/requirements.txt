@@ -7,6 +7,10 @@ celery==5.4.0
 redis==5.0.4
 python-multipart==0.0.9
 faster-whisper==1.0.2
+# faster-whisper's utils.py imports requests directly for model downloads, but
+# neither faster-whisper nor huggingface-hub declares it as a dependency
+# anymore (huggingface-hub moved to httpx internally) — pin it explicitly.
+requests==2.32.3
 scenedetect[opencv]==0.6.4
 python-json-logger==2.0.7
 aiofiles==23.2.1
