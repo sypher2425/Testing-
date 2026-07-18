@@ -46,6 +46,9 @@ services:
       - REDIS_URL=redis://redis:6379/0
     volumes:
       - app_data:/data
+      # Optional cookies.txt for yt-dlp (see secrets/README.md); mounted
+      # read-only so it can be dropped in/updated without a rebuild.
+      - ./secrets:/run/secrets:ro
     depends_on:
       redis:
         condition: service_healthy

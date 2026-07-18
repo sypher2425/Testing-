@@ -94,7 +94,10 @@ def _classify(stderr: str) -> str:
 def _run(args: list[str], timeout: int) -> subprocess.CompletedProcess:
     cookies_file = get_settings().COOKIES_FILE
     cmd = ["yt-dlp"]
-    if cookies_file:
+    # COOKIES_FILE is allowed to point at a file that doesn't exist yet
+    # (e.g. the user hasn't dropped one into secrets/ yet) — degrade to no
+    # cookies rather than making every single fetch fail on a missing file.
+    if cookies_file and Path(cookies_file).is_file():
         cmd += ["--cookies", cookies_file]
     cmd += args
     try:

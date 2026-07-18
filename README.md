@@ -189,9 +189,16 @@ version, and retries the extraction exactly once. If the update itself fails
 (no network, etc.) it's logged and the pinned version is used for that retry
 — an update failure never crashes the job or the worker.
 
-Set `COOKIES_FILE` to the path of a cookies.txt file (exported from your
-browser) if you need to fetch from an account-gated Instagram video — it's
-read on every yt-dlp invocation if set, but nothing requires it.
+**Cookies for account-gated fetches** (mainly Instagram view counts, which
+are often hidden from anonymous requests): drop a `cookies.txt` (exported
+from your browser) at `secrets/cookies.txt` — that directory is bind-mounted
+into the `worker` container at `/run/secrets` — and set
+`COOKIES_FILE=/run/secrets/cookies.txt` in `.env`, then
+`docker compose restart worker`. See `secrets/README.md` for the full
+walkthrough. **Treat that file like a password** — it carries live session
+tokens for whatever account you exported it from. Nothing requires it; leave
+`COOKIES_FILE` blank if you don't need it, and a missing/misconfigured file
+just falls back to anonymous requests rather than breaking every fetch.
 
 ## Environment variables
 
@@ -207,7 +214,7 @@ See `.env.example` for the full annotated list. Highlights:
 | `ADAPTIVE_MIN_FRAMES` / `ADAPTIVE_MAX_FRAMES` | 30 / 150 | Bounds for adaptive mode's target frame count |
 | `RETENTION_HOURS` | 72 | Jobs + artifacts are deleted this many hours after completion by a periodic Celery task |
 | `YTDLP_COMMENT_LIMIT` | 100 | Top comments (by likes) saved per URL-ingested job |
-| `COOKIES_FILE` | (unset) | Path to a cookies.txt for account-gated fetches (mainly Instagram); optional |
+| `COOKIES_FILE` | (unset) | In-container path to a cookies.txt for account-gated fetches — use `/run/secrets/cookies.txt` and drop the file at `secrets/cookies.txt` on the host; optional |
 | `STALE_JOB_TIMEOUT_MINUTES` | 30 | A job with no heartbeat update for this long is marked `failed` (worker crash recovery) |
 | `CORS_ORIGINS` | http://localhost:3000 | Comma-separated list |
 
