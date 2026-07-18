@@ -109,3 +109,47 @@ def test_frame_path_traversal_is_rejected(client):
     job_id = create_resp.json()["job_id"]
     resp = client.get(f"/api/jobs/{job_id}/frames/..%2F..%2Fmanifest.json")
     assert resp.status_code in (400, 404)
+
+
+def test_create_job_rejects_both_file_and_url(client):
+    resp = client.post(
+        "/api/jobs",
+        files={"file": ("clip.mp4", io.BytesIO(b"fake mp4 bytes"), "video/mp4")},
+        data={"mode": "adaptive", "url": "https://youtu.be/xyz"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "bad_request"
+
+
+def test_create_job_rejects_neither_file_nor_url(client):
+    resp = client.post("/api/jobs", data={"mode": "adaptive"})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "bad_request"
+
+
+def test_create_job_rejects_local_network_url(client):
+    resp = client.post("/api/jobs", data={"mode": "adaptive", "url": "http://localhost:8000/x"})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "bad_request"
+
+
+def test_create_job_rejects_non_http_url(client):
+    resp = client.post("/api/jobs", data={"mode": "adaptive", "url": "ftp://example.com/x"})
+    assert resp.status_code == 400
+
+
+def test_create_job_with_url_succeeds_and_defers_probe(client):
+    with patch("app.tasks.process_job.delay") as mock_delay:
+        resp = client.post(
+            "/api/jobs",
+            data={"mode": "adaptive", "url": "https://youtu.be/xyz", "manual_view_count": "500"},
+        )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    mock_delay.assert_called_once_with(job_id)
+
+    status_resp = client.get(f"/api/jobs/{job_id}")
+    assert status_resp.status_code == 200
+    body = status_resp.json()
+    assert body["source_url"] == "https://youtu.be/xyz"
+    assert body["status"] == "queued"

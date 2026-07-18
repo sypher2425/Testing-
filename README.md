@@ -79,9 +79,14 @@ uses plain SQLAlchemy types (no SQLite-specific features) so swapping
 ## How a job flows
 
 ```
-queued → probing → transcribing → extracting_frames → generating_metadata → zipping → completed
-                                                                                      ↘ failed / cancelled (from any state)
+queued → fetching_source → probing → transcribing → extracting_frames → generating_metadata → zipping → completed
+                                                                                              ↘ failed / cancelled (from any state)
 ```
+
+`fetching_source` is a fast no-op for a plain file upload (the file's already on
+disk). For a pasted URL, this is where [URL ingestion](#url-ingestion-youtube-tiktok-instagram)
+happens — metadata + video + comments via yt-dlp — before the rest of the
+pipeline runs exactly as it would for an uploaded file.
 
 Each step reports 0-100% progress; the API streams updates over Server-Sent
 Events (`GET /api/jobs/{id}/events`) with a polling fallback
@@ -100,6 +105,7 @@ forever".
   transcript/subtitles.srt
   frames/0000.000.jpg ...
   metadata/frames.json
+  performance/comments.json   # only present for URL-ingested jobs
   manifest.json
   output.zip
 ```
@@ -121,7 +127,7 @@ All responses are JSON. Errors use a consistent envelope:
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/jobs` | Multipart upload + options (`mode`, `interval_ms`, `target_frames`, `frame_format`, `frame_max_dim`). Returns `{ job_id }` (202) immediately. |
+| POST | `/api/jobs` | Multipart: either `file` or `url` (exactly one), plus options (`mode`, `interval_ms`, `target_frames`, `frame_format`, `frame_max_dim`) and optional `manual_*` performance overrides. Returns `{ job_id }` (202) immediately. |
 | GET | `/api/jobs` | Paginated recent jobs |
 | GET | `/api/jobs/{id}` | Full job status + per-step progress + error detail |
 | GET | `/api/jobs/{id}/events` | SSE progress stream |
@@ -143,6 +149,50 @@ All responses are JSON. Errors use a consistent envelope:
 | `per_second` | One frame per second |
 | `every_frame` | Every decoded frame, hard-capped at `MAX_FRAMES` (default 2000). Videos that would exceed the cap are rejected with a message suggesting `adaptive` instead — the job fails cleanly rather than the worker choking on it. |
 
+## URL ingestion (YouTube, TikTok, Instagram)
+
+Paste a link instead of uploading a file and the `fetching_source` step uses
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) to pull the video down and feed it
+into the exact same pipeline as an uploaded file — frame extraction,
+transcription, and the manifest are all unaffected by where the source came
+from.
+
+Auto-fetched where the platform allows it, mapped into `manifest.json`'s
+`performance` block: view/like/comment/share counts, title, description,
+uploader, upload date, and hashtags. Top comments (by likes, capped at
+`YTDLP_COMMENT_LIMIT`, default 100) are saved to `performance/comments.json` —
+best-effort on TikTok/Instagram, since comment scraping there is more fragile
+than on YouTube.
+
+Any `manual_*` field supplied at upload time (`manual_view_count`,
+`manual_title`, `manual_hashtags`, etc. — comma-separated for hashtags) always
+overrides the auto-fetched value, and is the sole source when no URL is given
+at all (a plain file upload can still carry manually-entered performance
+data). `manifest.json`'s `performance.fields_from` records which fields came
+from which source.
+
+**Failure handling** — two tiers:
+- Can't get the **video itself** (private, geo-blocked, deleted, or yt-dlp's
+  extractor doesn't recognize the site) → the job fails with a typed error:
+  `video_unavailable` (updating yt-dlp won't help) or `extractor_outdated`
+  (it might).
+- Can't get **metadata/comments** but the video downloaded fine → logged as a
+  warning, falls back to manual fields (or nulls), and the job completes
+  normally. This is never fatal.
+
+**Keeping yt-dlp current without breaking reproducible builds:** the version
+is pinned in `requirements.txt` like every other dependency — it is *never*
+auto-updated on container startup. Instead, when an extraction fails in a way
+that looks like a broken/outdated extractor (not a 404/private video), the
+worker runs a one-time `pip install --upgrade yt-dlp`, logs the old and new
+version, and retries the extraction exactly once. If the update itself fails
+(no network, etc.) it's logged and the pinned version is used for that retry
+— an update failure never crashes the job or the worker.
+
+Set `COOKIES_FILE` to the path of a cookies.txt file (exported from your
+browser) if you need to fetch from an account-gated Instagram video — it's
+read on every yt-dlp invocation if set, but nothing requires it.
+
 ## Environment variables
 
 See `.env.example` for the full annotated list. Highlights:
@@ -156,6 +206,8 @@ See `.env.example` for the full annotated list. Highlights:
 | `MAX_FRAMES` | 2000 | Hard cap for `every_frame`; soft cap (with a warning) for other modes |
 | `ADAPTIVE_MIN_FRAMES` / `ADAPTIVE_MAX_FRAMES` | 30 / 150 | Bounds for adaptive mode's target frame count |
 | `RETENTION_HOURS` | 72 | Jobs + artifacts are deleted this many hours after completion by a periodic Celery task |
+| `YTDLP_COMMENT_LIMIT` | 100 | Top comments (by likes) saved per URL-ingested job |
+| `COOKIES_FILE` | (unset) | Path to a cookies.txt for account-gated fetches (mainly Instagram); optional |
 | `STALE_JOB_TIMEOUT_MINUTES` | 30 | A job with no heartbeat update for this long is marked `failed` (worker crash recovery) |
 | `CORS_ORIGINS` | http://localhost:3000 | Comma-separated list |
 

@@ -4,9 +4,11 @@ import type {
   ErrorEnvelope,
   FrameListResponse,
   JobListResponse,
+  JobSource,
   JobStatusResponse,
   LogsResponse,
   Manifest,
+  ManualPerformanceOverrides,
   TranscriptJSON,
 } from "./types";
 
@@ -44,17 +46,29 @@ async function handleResponse<T>(res: Response): Promise<T> {
 }
 
 export async function createJob(
-  file: File,
+  source: JobSource,
   options: CreateJobOptions,
+  manualOverrides?: ManualPerformanceOverrides,
   onProgress?: (percent: number) => void
 ): Promise<CreateJobResponse> {
   const formData = new FormData();
-  formData.append("file", file);
+  if (source.kind === "file") {
+    formData.append("file", source.file);
+  } else {
+    formData.append("url", source.url);
+  }
   formData.append("mode", options.mode);
   formData.append("interval_ms", String(options.interval_ms));
   formData.append("target_frames", String(options.target_frames));
   formData.append("frame_format", options.frame_format);
   formData.append("frame_max_dim", String(options.frame_max_dim));
+  if (manualOverrides) {
+    for (const [key, value] of Object.entries(manualOverrides)) {
+      if (value !== undefined && value !== null && value !== "") {
+        formData.append(`manual_${key}`, String(value));
+      }
+    }
+  }
 
   return new Promise<CreateJobResponse>((resolve, reject) => {
     const xhr = new XMLHttpRequest();

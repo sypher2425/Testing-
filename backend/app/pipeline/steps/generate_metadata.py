@@ -33,10 +33,15 @@ class GenerateMetadataStep(PipelineStep):
         ctx.storage.save_bytes(ctx.job_relative("metadata", "frames.json"), frames_json_bytes)
         ctx.set_step_progress(self.name, 40)
 
+        source_description = (
+            "Video downloaded from the source URL"
+            if ctx.shared.get("source_url")
+            else "Original uploaded video file"
+        )
         files = [
             {
                 "path": f"source/{ctx.shared['stored_source_filename']}",
-                "description": "Original uploaded video file",
+                "description": source_description,
                 "size_bytes": ctx.storage.size_of(ctx.shared["source_relative_path"]),
             }
         ]
@@ -85,6 +90,18 @@ class GenerateMetadataStep(PipelineStep):
             }
         )
 
+        performance = ctx.shared.get("performance")
+        if performance is not None:
+            comments_rel = ctx.job_relative("performance", "comments.json")
+            if ctx.storage.exists(comments_rel):
+                files.append(
+                    {
+                        "path": "performance/comments.json",
+                        "description": f"Top comments fetched from {performance.get('platform', 'source')} (best-effort)",
+                        "size_bytes": ctx.storage.size_of(comments_rel),
+                    }
+                )
+
         manifest = {
             "job_id": ctx.job_id,
             "app_version": settings.APP_VERSION,
@@ -104,6 +121,7 @@ class GenerateMetadataStep(PipelineStep):
                 "started_at": ctx.shared.get("started_at"),
                 "manifest_generated_at": datetime.now(timezone.utc).isoformat(),
             },
+            "performance": performance,
             "analyses": {},
         }
 

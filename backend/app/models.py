@@ -10,6 +10,7 @@ from app.database import Base
 
 PIPELINE_STEPS = [
     "queued",
+    "fetching_source",
     "probing",
     "transcribing",
     "extracting_frames",
@@ -40,6 +41,9 @@ class Job(Base):
 
     mode: Mapped[str] = mapped_column(String(32), default="adaptive")
     options: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    performance: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -77,6 +81,7 @@ class Job(Base):
             "overall_progress": self.overall_progress,
             "mode": self.mode,
             "options": self.options or {},
+            "source_url": self.source_url,
             "video": {
                 "duration_seconds": self.duration_seconds,
                 "width": self.width,

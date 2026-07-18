@@ -8,6 +8,7 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_tmp_root}/test.db"
 os.environ["REDIS_URL"] = "redis://localhost:6379/15"
 os.environ["WHISPER_MODEL_SIZE"] = "tiny"
 os.environ["MIN_FREE_DISK_MB"] = "1"
+Path(os.environ["DATA_DIR"]).mkdir(parents=True, exist_ok=True)
 
 import pytest  # noqa: E402
 

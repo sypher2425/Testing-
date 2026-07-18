@@ -37,6 +37,7 @@ export interface JobError {
 
 export type JobStatusValue =
   | "queued"
+  | "fetching_source"
   | "probing"
   | "transcribing"
   | "extracting_frames"
@@ -55,6 +56,7 @@ export interface JobStatusResponse {
   overall_progress: number;
   mode: string;
   options: Record<string, unknown>;
+  source_url: string | null;
   video: VideoProperties;
   language: string | null;
   frame_count: number | null;
@@ -109,6 +111,28 @@ export interface ManifestFileEntry {
   size_bytes: number;
 }
 
+export interface PerformanceComment {
+  author: string | null;
+  text: string | null;
+  like_count: number | null;
+  timestamp: number | null;
+}
+
+export interface PerformanceData {
+  source_url: string | null;
+  platform: string;
+  title: string | null;
+  description: string | null;
+  uploader: string | null;
+  upload_date: string | null;
+  view_count: number | null;
+  like_count: number | null;
+  comment_count: number | null;
+  share_count: number | null;
+  hashtags: string[];
+  fields_from: Record<string, "auto" | "manual">;
+}
+
 export interface Manifest {
   job_id: string;
   app_version: string;
@@ -121,8 +145,25 @@ export interface Manifest {
   transcript_available: boolean;
   files: ManifestFileEntry[];
   processing: Record<string, string | null>;
+  performance: PerformanceData | null;
   analyses: Record<string, unknown>;
 }
+
+/** Optional manual performance fields a user can supply at upload time —
+ * override whatever yt-dlp auto-fetches, or stand alone with no URL at all. */
+export interface ManualPerformanceOverrides {
+  title?: string;
+  description?: string;
+  uploader?: string;
+  upload_date?: string;
+  view_count?: number;
+  like_count?: number;
+  comment_count?: number;
+  share_count?: number;
+  hashtags?: string; // comma-separated, matches the backend form field
+}
+
+export type JobSource = { kind: "file"; file: File } | { kind: "url"; url: string };
 
 export interface ErrorEnvelope {
   error: {
@@ -146,6 +187,7 @@ export interface LogsResponse {
 export const TERMINAL_STATES: JobStatusValue[] = ["completed", "failed", "cancelled"];
 
 export const PIPELINE_STEP_ORDER: { key: string; label: string }[] = [
+  { key: "fetching_source", label: "Fetching source video" },
   { key: "probing", label: "Probing video" },
   { key: "transcribing", label: "Transcribing audio" },
   { key: "extracting_frames", label: "Extracting frames" },

@@ -60,6 +60,7 @@ class JobStatusResponse(BaseModel):
     overall_progress: int
     mode: str
     options: dict[str, Any]
+    source_url: str | None = None
     video: VideoProperties
     language: str | None
     frame_count: int | None
@@ -114,6 +115,25 @@ class ManifestFileEntry(BaseModel):
     size_bytes: int
 
 
+class PerformanceData(BaseModel):
+    """Populated from yt-dlp for URL-ingested jobs; manual_* fields (if
+    supplied at upload time) always take precedence over the auto-fetched
+    value, and act as the sole source when auto-fetch fails or wasn't run."""
+
+    source_url: str | None = None
+    platform: str = "manual"
+    title: str | None = None
+    description: str | None = None
+    uploader: str | None = None
+    upload_date: str | None = None
+    view_count: int | None = None
+    like_count: int | None = None
+    comment_count: int | None = None
+    share_count: int | None = None
+    hashtags: list[str] = Field(default_factory=list)
+    fields_from: dict[str, Literal["auto", "manual"]] = Field(default_factory=dict)
+
+
 class Manifest(BaseModel):
     job_id: str
     app_version: str
@@ -126,6 +146,7 @@ class Manifest(BaseModel):
     transcript_available: bool
     files: list[ManifestFileEntry]
     processing: dict[str, str | None]
+    performance: PerformanceData | None = None
     analyses: dict[str, Any] = Field(default_factory=dict)
 
 

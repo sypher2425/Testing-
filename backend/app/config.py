@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     FFMPEG_TIMEOUT_SECONDS: int = 3600
     WHISPER_TIMEOUT_SECONDS: int = 3600
 
+    # URL ingestion (yt-dlp)
+    # The installed version is pinned in requirements.txt for reproducible
+    # builds. It is never auto-updated on startup; only on-demand, once, when
+    # an extraction fails in a way that looks like a broken/outdated
+    # extractor rather than a genuinely unavailable video (see app/utils/ytdlp.py).
+    YTDLP_TIMEOUT_SECONDS: int = 1800
+    YTDLP_METADATA_TIMEOUT_SECONDS: int = 120
+    YTDLP_UPDATE_TIMEOUT_SECONDS: int = 120
+    YTDLP_COMMENT_LIMIT: int = 100
+    COOKIES_FILE: str = ""
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
 

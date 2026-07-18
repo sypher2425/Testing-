@@ -22,12 +22,14 @@ logger = logging.getLogger("pipeline.runner")
 def _build_pipeline() -> list:
     # Imported lazily to avoid circular imports at module load time.
     from app.pipeline.steps.extract_frames import ExtractFramesStep
+    from app.pipeline.steps.fetch_source import FetchSourceStep
     from app.pipeline.steps.generate_metadata import GenerateMetadataStep
     from app.pipeline.steps.probe import ProbeStep
     from app.pipeline.steps.transcribe import TranscribeStep
     from app.pipeline.steps.zip_output import ZipOutputStep
 
     return [
+        FetchSourceStep(),
         ProbeStep(),
         TranscribeStep(),
         ExtractFramesStep(),
@@ -75,7 +77,9 @@ def run_pipeline(job_id: str) -> None:
     if job is None:
         return
 
-    job.status = "probing"
+    pipeline = _build_pipeline()
+
+    job.status = pipeline[0].name if pipeline else "queued"
     job.started_at = datetime.now(timezone.utc)
     job.last_heartbeat = datetime.now(timezone.utc)
     db.commit()
@@ -93,12 +97,13 @@ def run_pipeline(job_id: str) -> None:
     ctx.shared["original_filename"] = job.original_filename
     ctx.shared["stored_source_filename"] = job.stored_source_filename
     ctx.shared["source_relative_path"] = ctx.job_relative("source", job.stored_source_filename)
+    ctx.shared["source_url"] = job.source_url
     ctx.shared["started_at"] = job.started_at.isoformat() if job.started_at else None
 
     persist_log("info", f"Starting pipeline for job {job_id} (mode={job.mode})")
 
     try:
-        for step in _build_pipeline():
+        for step in pipeline:
             ctx.check_cancel()
             db.expire_all()
             job = db.get(Job, job_id)

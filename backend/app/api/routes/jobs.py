@@ -5,6 +5,7 @@ import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -50,15 +51,64 @@ def _to_status_response(job: Job) -> JobStatusResponse:
     return JobStatusResponse.model_validate(job.to_dict())
 
 
+_BLOCKED_HOSTNAME_PREFIXES = ("127.", "10.", "192.168.", "169.254.")
+_BLOCKED_HOSTNAMES = {"localhost", "0.0.0.0"}
+
+
+def _validate_ingest_url(url: str) -> None:
+    """Defensive scheme/host check before handing a user-supplied URL to
+    yt-dlp — restricts to public http(s) targets, not an internal/local one."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise bad_request("url must be a valid http:// or https:// URL")
+    hostname = parsed.hostname.lower()
+    if hostname in _BLOCKED_HOSTNAMES or any(hostname.startswith(p) for p in _BLOCKED_HOSTNAME_PREFIXES):
+        raise bad_request("url must not point to a local/private network address")
+
+
+def _build_performance_overrides(
+    manual_title: str | None,
+    manual_description: str | None,
+    manual_uploader: str | None,
+    manual_upload_date: str | None,
+    manual_view_count: int | None,
+    manual_like_count: int | None,
+    manual_comment_count: int | None,
+    manual_share_count: int | None,
+    manual_hashtags: str | None,
+) -> dict:
+    return {
+        "title": manual_title,
+        "description": manual_description,
+        "uploader": manual_uploader,
+        "upload_date": manual_upload_date,
+        "view_count": manual_view_count,
+        "like_count": manual_like_count,
+        "comment_count": manual_comment_count,
+        "share_count": manual_share_count,
+        "hashtags": [h.strip() for h in manual_hashtags.split(",") if h.strip()] if manual_hashtags else [],
+    }
+
+
 @router.post("", status_code=202, response_model=CreateJobResponse)
 async def create_job(
     request: Request,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    url: str | None = Form(None),
     mode: str = Form("adaptive"),
     interval_ms: int = Form(1000),
     target_frames: int = Form(80),
     frame_format: str = Form("jpeg"),
     frame_max_dim: int = Form(1280),
+    manual_title: str | None = Form(None),
+    manual_description: str | None = Form(None),
+    manual_uploader: str | None = Form(None),
+    manual_upload_date: str | None = Form(None),
+    manual_view_count: int | None = Form(None),
+    manual_like_count: int | None = Form(None),
+    manual_comment_count: int | None = Form(None),
+    manual_share_count: int | None = Form(None),
+    manual_hashtags: str | None = Form(None),
     db: Session = Depends(db_session),
     settings: Settings = Depends(get_settings),
     storage: StorageBackend = Depends(get_storage),
@@ -74,76 +124,121 @@ async def create_job(
     except ValidationError as exc:
         raise unprocessable("Invalid job options", json.loads(exc.json())) from exc
 
-    if not file.filename:
-        raise bad_request("Uploaded file must have a filename")
+    has_file = file is not None and bool(file.filename)
+    has_url = bool(url and url.strip())
+    if has_file and has_url:
+        raise bad_request("Provide either a file upload or a url, not both")
+    if not has_file and not has_url:
+        raise bad_request("Either a file upload or a url must be provided")
 
-    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-    if ext not in ALLOWED_EXTENSIONS:
-        raise unprocessable(
-            f"Unsupported file extension '.{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
-        )
-
-    content_length = request.headers.get("content-length")
-    incoming_mb = (int(content_length) / (1024 * 1024)) if content_length else 0.0
-    try:
-        ensure_enough_disk(str(settings.data_path), incoming_mb=incoming_mb)
-    except ValueError as exc:
-        raise insufficient_storage(str(exc)) from exc
+    performance_overrides = _build_performance_overrides(
+        manual_title,
+        manual_description,
+        manual_uploader,
+        manual_upload_date,
+        manual_view_count,
+        manual_like_count,
+        manual_comment_count,
+        manual_share_count,
+        manual_hashtags,
+    )
+    options_dict = options.model_dump(mode="json")
+    options_dict["performance_overrides"] = performance_overrides
 
     job_id = str(uuid.uuid4())
-    stored_source_filename = f"video.{ext}"
-    relative_source_path = f"{job_id}/source/{stored_source_filename}"
-    dest_path = storage.get(relative_source_path)
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
-    total_bytes = 0
-    try:
-        with open(dest_path, "wb") as out:
-            while True:
-                chunk = await file.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                total_bytes += len(chunk)
-                if total_bytes > max_bytes:
-                    raise unprocessable(
-                        f"Upload exceeds MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB}MB)"
-                    )
-                out.write(chunk)
-    except AppError:
-        storage.delete(job_id)
-        raise
-    finally:
-        await file.close()
+    if has_url:
+        assert url is not None
+        url = url.strip()
+        _validate_ingest_url(url)
+        try:
+            ensure_enough_disk(str(settings.data_path), incoming_mb=0)
+        except ValueError as exc:
+            raise insufficient_storage(str(exc)) from exc
 
-    if total_bytes == 0:
-        storage.delete(job_id)
-        raise bad_request("Uploaded file is empty")
+        job = Job(
+            id=job_id,
+            original_filename=url[:512],
+            stored_source_filename="video",
+            status="queued",
+            current_step="queued",
+            mode=options.mode.value,
+            options=options_dict,
+            source_url=url,
+            step_progress={},
+            last_heartbeat=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.commit()
 
-    try:
-        ffprobe(str(dest_path), timeout=30)
-    except FFmpegError as exc:
-        storage.delete(job_id)
-        raise unprocessable(
-            "File failed video validation (ffprobe could not read it). "
-            "It may be corrupt or not a real video file despite its extension.",
-            exc.to_detail(),
-        ) from exc
+    else:
+        assert file is not None and file.filename
+        ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+        if ext not in ALLOWED_EXTENSIONS:
+            raise unprocessable(
+                f"Unsupported file extension '.{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+            )
 
-    job = Job(
-        id=job_id,
-        original_filename=sanitize_filename(file.filename),
-        stored_source_filename=stored_source_filename,
-        status="queued",
-        current_step="queued",
-        mode=options.mode.value,
-        options=options.model_dump(mode="json"),
-        file_size_bytes=total_bytes,
-        step_progress={},
-        last_heartbeat=datetime.now(timezone.utc),
-    )
-    db.add(job)
-    db.commit()
+        content_length = request.headers.get("content-length")
+        incoming_mb = (int(content_length) / (1024 * 1024)) if content_length else 0.0
+        try:
+            ensure_enough_disk(str(settings.data_path), incoming_mb=incoming_mb)
+        except ValueError as exc:
+            raise insufficient_storage(str(exc)) from exc
+
+        stored_source_filename = f"video.{ext}"
+        relative_source_path = f"{job_id}/source/{stored_source_filename}"
+        dest_path = storage.get(relative_source_path)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+        total_bytes = 0
+        try:
+            with open(dest_path, "wb") as out:
+                while True:
+                    chunk = await file.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        raise unprocessable(
+                            f"Upload exceeds MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB}MB)"
+                        )
+                    out.write(chunk)
+        except AppError:
+            storage.delete(job_id)
+            raise
+        finally:
+            await file.close()
+
+        if total_bytes == 0:
+            storage.delete(job_id)
+            raise bad_request("Uploaded file is empty")
+
+        try:
+            ffprobe(str(dest_path), timeout=30)
+        except FFmpegError as exc:
+            storage.delete(job_id)
+            raise unprocessable(
+                "File failed video validation (ffprobe could not read it). "
+                "It may be corrupt or not a real video file despite its extension.",
+                exc.to_detail(),
+            ) from exc
+
+        job = Job(
+            id=job_id,
+            original_filename=sanitize_filename(file.filename),
+            stored_source_filename=stored_source_filename,
+            status="queued",
+            current_step="queued",
+            mode=options.mode.value,
+            options=options_dict,
+            file_size_bytes=total_bytes,
+            step_progress={},
+            last_heartbeat=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.commit()
 
     from app.tasks import process_job
 

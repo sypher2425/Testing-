@@ -2,6 +2,7 @@ import type { JobStatusValue } from "@/lib/types";
 
 const STYLES: Record<JobStatusValue, string> = {
   queued: "bg-slate-500/15 text-slate-300 border-slate-500/30",
+  fetching_source: "bg-blue-500/15 text-blue-300 border-blue-500/30",
   probing: "bg-blue-500/15 text-blue-300 border-blue-500/30",
   transcribing: "bg-blue-500/15 text-blue-300 border-blue-500/30",
   extracting_frames: "bg-blue-500/15 text-blue-300 border-blue-500/30",
@@ -14,6 +15,7 @@ const STYLES: Record<JobStatusValue, string> = {
 
 const LABELS: Record<JobStatusValue, string> = {
   queued: "Queued",
+  fetching_source: "Fetching source",
   probing: "Probing",
   transcribing: "Transcribing",
   extracting_frames: "Extracting frames",

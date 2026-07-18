@@ -264,3 +264,129 @@ def test_zip_output_step_creates_archive_with_all_files(tmp_path):
         names = set(zf.namelist())
     assert "manifest.json" in names
     assert "frames/0000.000.jpg" in names
+
+
+def _fake_metadata(**overrides):
+    from app.utils.ytdlp import VideoMetadata
+
+    defaults = dict(
+        source_url="https://youtu.be/xyz",
+        platform="youtube",
+        title="Original Title",
+        description="a video",
+        uploader="uploader1",
+        upload_date="2024-01-15",
+        view_count=1000,
+        like_count=50,
+        comment_count=3,
+        share_count=None,
+        hashtags=["fun"],
+        duration=12.0,
+        ext="mp4",
+        filesize_approx=1000,
+    )
+    defaults.update(overrides)
+    return VideoMetadata(**defaults)
+
+
+def test_fetch_source_step_noop_for_plain_upload(tmp_path):
+    from app.pipeline.steps.fetch_source import FetchSourceStep
+
+    ctx, _, shared_state = make_ctx(tmp_path, options={})
+    ctx.shared["source_url"] = None
+
+    FetchSourceStep().run(ctx)
+
+    assert "performance" not in ctx.shared
+    assert shared_state["step_progress"]["fetching_source"] == 100
+
+
+def test_fetch_source_step_manual_only_builds_performance(tmp_path):
+    from app.pipeline.steps.fetch_source import FetchSourceStep
+
+    ctx, _, shared_state = make_ctx(
+        tmp_path,
+        options={"performance_overrides": {"title": "My Manual Title", "view_count": 42, "hashtags": ["x"]}},
+    )
+    ctx.shared["source_url"] = None
+
+    FetchSourceStep().run(ctx)
+
+    perf = ctx.shared["performance"]
+    assert perf["platform"] == "manual"
+    assert perf["title"] == "My Manual Title"
+    assert perf["view_count"] == 42
+    assert perf["fields_from"]["title"] == "manual"
+    assert shared_state["performance"] == perf
+
+
+def test_fetch_source_step_url_success_merges_manual_override(tmp_path):
+    from app.pipeline.steps.fetch_source import FetchSourceStep
+
+    ctx, logs, shared_state = make_ctx(
+        tmp_path,
+        options={"performance_overrides": {"title": "Overridden Title"}},
+    )
+    ctx.shared["source_url"] = "https://youtu.be/xyz"
+    ctx.shared["original_filename"] = "https://youtu.be/xyz"
+
+    def fake_download(url, dest_dir, *, log):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        path = dest_dir / "video.mp4"
+        path.write_bytes(b"fake video bytes")
+        return path
+
+    with patch("app.pipeline.steps.fetch_source.extract_metadata", return_value=_fake_metadata()), patch(
+        "app.pipeline.steps.fetch_source.download_video", side_effect=fake_download
+    ), patch("app.pipeline.steps.fetch_source.extract_comments", return_value=[{"author": "a", "text": "hi", "like_count": 1}]):
+        FetchSourceStep().run(ctx)
+
+    assert ctx.shared["stored_source_filename"] == "video.mp4"
+    assert ctx.storage.exists(ctx.shared["source_relative_path"])
+
+    perf = ctx.shared["performance"]
+    assert perf["title"] == "Overridden Title"  # manual wins
+    assert perf["fields_from"]["title"] == "manual"
+    assert perf["view_count"] == 1000  # auto value, no manual override given
+    assert perf["fields_from"]["view_count"] == "auto"
+    assert perf["platform"] == "youtube"
+
+    # original_filename should be updated to the resolved title since no manual title override... wait manual title WAS given, so that's used.
+    assert shared_state["original_filename"] == "Overridden Title"
+
+    comments = json.loads(ctx.storage.get(ctx.job_relative("performance", "comments.json")).read_bytes())
+    assert comments == [{"author": "a", "text": "hi", "like_count": 1}]
+
+
+def test_fetch_source_step_video_unavailable_fails_job(tmp_path):
+    from app.pipeline.steps.fetch_source import FetchSourceStep
+    from app.utils.ytdlp import YtDlpError
+
+    ctx, _, _ = make_ctx(tmp_path, options={})
+    ctx.shared["source_url"] = "https://youtu.be/private"
+
+    with patch(
+        "app.pipeline.steps.fetch_source.extract_metadata",
+        side_effect=YtDlpError("video_unavailable", "Private video"),
+    ):
+        with pytest.raises(PipelineFailedError) as exc_info:
+            FetchSourceStep().run(ctx)
+
+    assert exc_info.value.code == "video_unavailable"
+
+
+def test_fetch_source_step_download_failure_fails_job(tmp_path):
+    from app.pipeline.steps.fetch_source import FetchSourceStep
+    from app.utils.ytdlp import YtDlpError
+
+    ctx, _, _ = make_ctx(tmp_path, options={})
+    ctx.shared["source_url"] = "https://youtu.be/xyz"
+
+    with patch("app.pipeline.steps.fetch_source.extract_metadata", return_value=_fake_metadata(filesize_approx=None)), patch(
+        "app.pipeline.steps.fetch_source.download_video",
+        side_effect=YtDlpError("extractor_outdated", "still broken after update"),
+    ):
+        with pytest.raises(PipelineFailedError) as exc_info:
+            FetchSourceStep().run(ctx)
+
+    assert exc_info.value.code == "extractor_outdated"

@@ -4,9 +4,10 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { ApiError, createJob } from "@/lib/api";
 import JobList from "@/components/JobList";
+import ManualPerformanceFields from "@/components/ManualPerformanceFields";
 import ModeSelector from "@/components/ModeSelector";
-import UploadZone from "@/components/UploadZone";
-import type { CreateJobOptions } from "@/lib/types";
+import SourceInput from "@/components/SourceInput";
+import type { CreateJobOptions, JobSource, ManualPerformanceOverrides } from "@/lib/types";
 
 const DEFAULT_OPTIONS: CreateJobOptions = {
   mode: "adaptive",
@@ -18,20 +19,21 @@ const DEFAULT_OPTIONS: CreateJobOptions = {
 
 export default function HomePage() {
   const router = useRouter();
-  const [file, setFile] = useState<File | null>(null);
+  const [source, setSource] = useState<JobSource | null>(null);
   const [options, setOptions] = useState<CreateJobOptions>(DEFAULT_OPTIONS);
+  const [manualOverrides, setManualOverrides] = useState<ManualPerformanceOverrides>({});
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
   async function handleUpload() {
-    if (!file || uploading) return;
+    if (!source || uploading) return;
     setUploading(true);
     setError(null);
     setProgress(0);
     try {
-      const { job_id } = await createJob(file, options, setProgress);
+      const { job_id } = await createJob(source, options, manualOverrides, setProgress);
       setRefreshKey((k) => k + 1);
       router.push(`/jobs/${job_id}`);
     } catch (err) {
@@ -49,13 +51,15 @@ export default function HomePage() {
       <section>
         <h1 className="mb-1 text-2xl font-semibold">Turn a video into an AI-ready dataset</h1>
         <p className="mb-6 text-sm text-slate-400">
-          Upload a video and get back a transcript, representative frames, and a self-describing
-          manifest.json — small enough to feed straight into an LLM's context window.
+          Upload a video or paste a link, and get back a transcript, representative frames, and a
+          self-describing manifest.json — small enough to feed straight into an LLM's context
+          window.
         </p>
 
         <div className="space-y-4">
-          <UploadZone onFileSelected={setFile} disabled={uploading} selectedFile={file} />
+          <SourceInput onSourceChange={setSource} disabled={uploading} />
           <ModeSelector options={options} onChange={setOptions} />
+          <ManualPerformanceFields value={manualOverrides} onChange={setManualOverrides} />
 
           {error && (
             <div className="card border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>
@@ -75,8 +79,8 @@ export default function HomePage() {
               </div>
             </div>
           ) : (
-            <button className="btn-primary w-full sm:w-auto" disabled={!file} onClick={handleUpload}>
-              Upload &amp; process
+            <button className="btn-primary w-full sm:w-auto" disabled={!source} onClick={handleUpload}>
+              {source?.kind === "url" ? "Fetch & process" : "Upload & process"}
             </button>
           )}
         </div>
