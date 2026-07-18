@@ -4,6 +4,7 @@ import { useState } from "react";
 import { cancelOrDeleteJob, downloadUrl } from "@/lib/api";
 import type { JobStatusResponse } from "@/lib/types";
 import FrameGallery from "./FrameGallery";
+import JobLogPanel from "./JobLogPanel";
 import ManifestSummary from "./ManifestSummary";
 import PerformancePanel from "./PerformancePanel";
 import StatusChip from "./StatusChip";
@@ -71,6 +72,8 @@ export default function ResultsView({ job }: { job: JobStatusResponse }) {
           <FrameGallery jobId={job.job_id} />
         </section>
       </div>
+
+      <JobLogPanel jobId={job.job_id} live={false} collapsedByDefault />
     </div>
   );
 }

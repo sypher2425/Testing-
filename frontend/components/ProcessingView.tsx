@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { cancelOrDeleteJob, getLogs } from "@/lib/api";
-import { PIPELINE_STEP_ORDER, TERMINAL_STATES, type JobStatusResponse, type LogLine } from "@/lib/types";
+import { useEffect, useState } from "react";
+import { cancelOrDeleteJob } from "@/lib/api";
+import { PIPELINE_STEP_ORDER, TERMINAL_STATES, type JobStatusResponse } from "@/lib/types";
+import JobLogPanel from "./JobLogPanel";
 import StatusChip from "./StatusChip";
 
 function useElapsed(startedAt: string | null, stoppedAt: string | null) {
@@ -32,34 +33,7 @@ function formatElapsed(seconds: number): string {
 
 export default function ProcessingView({ job }: { job: JobStatusResponse }) {
   const elapsed = useElapsed(job.started_at, job.completed_at);
-  const [logs, setLogs] = useState<LogLine[]>([]);
   const [cancelling, setCancelling] = useState(false);
-  const sinceIdRef = useRef(0);
-  const logEndRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const res = await getLogs(job.job_id, sinceIdRef.current);
-        if (cancelled || res.logs.length === 0) return;
-        sinceIdRef.current = res.logs[res.logs.length - 1]!.id;
-        setLogs((prev) => [...prev, ...res.logs].slice(-300));
-      } catch {
-        // transient log fetch failure; next tick will retry
-      }
-    };
-    poll();
-    const id = TERMINAL_STATES.includes(job.status) ? null : setInterval(poll, 2000);
-    return () => {
-      cancelled = true;
-      if (id) clearInterval(id);
-    };
-  }, [job.job_id, job.status]);
-
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
 
   async function handleCancel() {
     if (cancelling) return;
@@ -142,27 +116,7 @@ export default function ProcessingView({ job }: { job: JobStatusResponse }) {
         )}
       </div>
 
-      <div className="card p-4">
-        <h3 className="mb-2 text-sm font-medium text-slate-300">Log</h3>
-        <div className="max-h-64 overflow-y-auto rounded-lg bg-black/30 p-3 font-mono text-xs leading-relaxed">
-          {logs.length === 0 && <p className="text-slate-600">Waiting for log output…</p>}
-          {logs.map((line) => (
-            <div
-              key={line.id}
-              className={
-                line.level === "error"
-                  ? "text-red-400"
-                  : line.level === "warning"
-                    ? "text-amber-400"
-                    : "text-slate-400"
-              }
-            >
-              <span className="text-slate-600">{new Date(line.timestamp).toLocaleTimeString()}</span> {line.message}
-            </div>
-          ))}
-          <div ref={logEndRef} />
-        </div>
-      </div>
+      <JobLogPanel jobId={job.job_id} live={!TERMINAL_STATES.includes(job.status)} />
     </div>
   );
 }
