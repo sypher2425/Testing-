@@ -65,6 +65,17 @@ class FetchSourceStep(PipelineStep):
             raise PipelineFailedError(exc.code, exc.message, exc.to_detail()) from exc
 
         ctx.info(f"Resolved source URL via yt-dlp: platform={metadata.platform}, title={metadata.title!r}")
+        missing = [
+            field
+            for field in ("view_count", "like_count", "comment_count", "share_count")
+            if getattr(metadata, field) is None
+        ]
+        if missing:
+            ctx.warning(
+                f"yt-dlp did not return a value for: {', '.join(missing)} (platform={metadata.platform}). "
+                "This is expected for share_count on Instagram (no such public metric exists there), "
+                "and view_count is sometimes withheld even with cookies configured depending on content type."
+            )
         ctx.set_step_progress(self.name, 20)
 
         if metadata.filesize_approx:

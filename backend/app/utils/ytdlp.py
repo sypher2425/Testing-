@@ -207,8 +207,16 @@ def _upload_date_iso(info: dict) -> str | None:
         return None
 
 
+def _cookies_status() -> str:
+    cookies_file = get_settings().COOKIES_FILE
+    if not cookies_file:
+        return "not configured"
+    return "in use" if Path(cookies_file).is_file() else f"configured ({cookies_file}) but file not found"
+
+
 def extract_metadata(url: str, *, log: callable) -> VideoMetadata:
     settings = get_settings()
+    log("info", f"yt-dlp cookies: {_cookies_status()}")
     proc = _run_with_extractor_retry(
         ["--dump-single-json", "--skip-download", "--no-warnings", url],
         timeout=settings.YTDLP_METADATA_TIMEOUT_SECONDS,
