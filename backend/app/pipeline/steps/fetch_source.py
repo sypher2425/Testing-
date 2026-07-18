@@ -62,6 +62,7 @@ class FetchSourceStep(PipelineStep):
         try:
             metadata = extract_metadata(source_url, log=ctx.log)
         except YtDlpError as exc:
+            self._log_ytdlp_failure(ctx, "metadata fetch", exc)
             raise PipelineFailedError(exc.code, exc.message, exc.to_detail()) from exc
 
         ctx.info(f"Resolved source URL via yt-dlp: platform={metadata.platform}, title={metadata.title!r}")
@@ -91,6 +92,7 @@ class FetchSourceStep(PipelineStep):
         try:
             downloaded_path = download_video(source_url, source_dir, log=ctx.log)
         except YtDlpError as exc:
+            self._log_ytdlp_failure(ctx, "video download", exc)
             raise PipelineFailedError(exc.code, exc.message, exc.to_detail()) from exc
 
         ctx.set_step_progress(self.name, 70)
@@ -128,6 +130,13 @@ class FetchSourceStep(PipelineStep):
         ctx.update_job({"performance": performance})
 
         ctx.set_step_progress(self.name, 100)
+
+    @staticmethod
+    def _log_ytdlp_failure(ctx: PipelineContext, stage: str, exc: YtDlpError) -> None:
+        ctx.error(f"yt-dlp {stage} failed [{exc.code}]: {exc.message}")
+        if exc.stderr:
+            tail = exc.stderr.strip()[-1500:]
+            ctx.error(f"yt-dlp stderr (last 1500 chars): {tail}")
 
     @staticmethod
     def _merge(metadata: VideoMetadata, manual: dict, *, comment_count_fallback: int | None) -> dict:
