@@ -11,7 +11,9 @@ failure, and never on startup.
 """
 import json
 import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -94,11 +96,21 @@ def _classify(stderr: str) -> str:
 def _run(args: list[str], timeout: int) -> subprocess.CompletedProcess:
     cookies_file = get_settings().COOKIES_FILE
     cmd = ["yt-dlp"]
+    cookies_scratch_path: str | None = None
     # COOKIES_FILE is allowed to point at a file that doesn't exist yet
     # (e.g. the user hasn't dropped one into secrets/ yet) — degrade to no
     # cookies rather than making every single fetch fail on a missing file.
     if cookies_file and Path(cookies_file).is_file():
-        cmd += ["--cookies", cookies_file]
+        # yt-dlp writes updated cookies back to this path when it's done
+        # (to persist a refreshed session) — the file is mounted read-only
+        # by design (see secrets/README.md), so hand yt-dlp a scratch copy
+        # instead of the original. Otherwise every invocation using cookies
+        # crashes with "Read-only file system" on exit.
+        scratch = tempfile.NamedTemporaryFile(delete=False, suffix=".cookies.txt")
+        scratch.close()
+        shutil.copyfile(cookies_file, scratch.name)
+        cookies_scratch_path = scratch.name
+        cmd += ["--cookies", cookies_scratch_path]
     cmd += args
     try:
         return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
@@ -108,6 +120,9 @@ def _run(args: list[str], timeout: int) -> subprocess.CompletedProcess:
         ) from exc
     except FileNotFoundError as exc:
         raise YtDlpError("download_failed", "yt-dlp is not installed", stderr=str(exc)) from exc
+    finally:
+        if cookies_scratch_path:
+            Path(cookies_scratch_path).unlink(missing_ok=True)
 
 
 def get_version() -> str:

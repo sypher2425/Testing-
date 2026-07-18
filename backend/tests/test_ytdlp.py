@@ -1,12 +1,15 @@
 import json
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from app.config import get_settings
 from app.utils.ytdlp import (
     YtDlpError,
     _classify,
+    _run,
     _run_with_extractor_retry,
     _self_update,
     extract_comments,
@@ -154,3 +157,34 @@ def test_extract_comments_sorts_by_likes_and_caps_limit():
     assert len(result) == 2
     assert result[0]["like_count"] == 50
     assert result[1]["like_count"] == 10
+
+
+def test_run_copies_cookies_to_scratch_and_leaves_original_untouched(tmp_path):
+    """yt-dlp writes an updated cookie jar back to whatever path it's given
+    on exit. The real cookies file is mounted read-only by design, so _run
+    must hand yt-dlp a scratch copy instead of the original path — this is
+    the regression test for the "Read-only file system" crash that broke
+    every cookie-authenticated fetch."""
+    cookies_file = tmp_path / "cookies.txt"
+    cookies_file.write_text("# Netscape HTTP Cookie File\noriginal-content\n")
+
+    captured_cmd: list[str] = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"{}", stderr=b"")
+
+    settings = get_settings()
+    original = settings.COOKIES_FILE
+    settings.COOKIES_FILE = str(cookies_file)
+    try:
+        with patch("app.utils.ytdlp.subprocess.run", side_effect=fake_subprocess_run):
+            _run(["--dump-single-json", "url"], timeout=30)
+    finally:
+        settings.COOKIES_FILE = original
+
+    assert "--cookies" in captured_cmd
+    passed_path = captured_cmd[captured_cmd.index("--cookies") + 1]
+    assert passed_path != str(cookies_file), "must not hand yt-dlp the read-only mounted path directly"
+    assert not Path(passed_path).exists(), "scratch cookies file must be cleaned up after the call"
+    assert cookies_file.read_text() == "# Netscape HTTP Cookie File\noriginal-content\n"
