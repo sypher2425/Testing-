@@ -72,6 +72,7 @@ class VideoMetadata:
     title: str | None
     description: str | None
     uploader: str | None
+    uploader_id: str | None
     upload_date: str | None
     view_count: int | None
     like_count: int | None
@@ -244,6 +245,7 @@ def extract_metadata(url: str, *, log: callable) -> VideoMetadata:
         title=info.get("title"),
         description=info.get("description"),
         uploader=info.get("uploader") or info.get("channel") or info.get("uploader_id"),
+        uploader_id=info.get("uploader_id") or info.get("channel_id"),
         upload_date=_upload_date_iso(info),
         view_count=info.get("view_count"),
         like_count=info.get("like_count"),
@@ -255,6 +257,60 @@ def extract_metadata(url: str, *, log: callable) -> VideoMetadata:
         filesize_approx=info.get("filesize") or info.get("filesize_approx"),
         raw=info,
     )
+
+
+def fetch_profile_reel_view_count(username: str, target_id: str, *, log: callable) -> int | None:
+    """Best-effort fallback for Instagram specifically: a single Reel's own
+    metadata response sometimes omits view_count even though the same
+    number is visible on the account's Reels grid tab in a browser. Fetch
+    that grid as a flat playlist and pull the matching entry's count.
+
+    This rides entirely on yt-dlp's own understanding of the Instagram
+    profile/Reels-listing page rather than hand-rolled HTML/JSON parsing,
+    so it inherits the same cookie handling and self-update path as
+    everything else — but whether the flat listing actually carries a
+    view/play count per entry is genuinely unconfirmed without testing
+    against a real account; never raises, only ever backfills a value it
+    can positively confirm."""
+    if not username:
+        return None
+    settings = get_settings()
+    profile_url = f"https://www.instagram.com/{username}/reels/"
+    try:
+        proc = _run(
+            ["--flat-playlist", "--dump-single-json", "--no-warnings", profile_url],
+            timeout=settings.YTDLP_METADATA_TIMEOUT_SECONDS,
+        )
+        if proc.returncode != 0:
+            log(
+                "warning",
+                f"Reels-grid view-count fallback couldn't fetch @{username}'s grid; continuing without it",
+            )
+            return None
+        info = json.loads(proc.stdout.decode(errors="replace"))
+        for entry in info.get("entries") or []:
+            if str(entry.get("id")) == str(target_id):
+                count = entry.get("view_count")
+                if count is None:
+                    count = entry.get("play_count")
+                if count is not None:
+                    log("info", f"Backfilled view_count={count} from @{username}'s Reels grid")
+                else:
+                    log(
+                        "warning",
+                        f"Found the reel in @{username}'s Reels grid listing, but it carries no "
+                        "view/play count field either — this platform genuinely isn't exposing it here.",
+                    )
+                return count
+        log(
+            "warning",
+            f"Reel {target_id} wasn't found in @{username}'s Reels grid listing "
+            "(may be further back than the first page, or the account restricts grid visibility)",
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 - best-effort by design, never fails the job
+        log("warning", f"Reels-grid view-count fallback failed: {exc}")
+        return None
 
 
 def download_video(url: str, dest_dir: Path, *, log: callable) -> Path:

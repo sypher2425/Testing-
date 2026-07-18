@@ -14,6 +14,7 @@ from app.utils.ytdlp import (
     _self_update,
     extract_comments,
     extract_metadata,
+    fetch_profile_reel_view_count,
 )
 
 
@@ -188,3 +189,42 @@ def test_run_copies_cookies_to_scratch_and_leaves_original_untouched(tmp_path):
     assert passed_path != str(cookies_file), "must not hand yt-dlp the read-only mounted path directly"
     assert not Path(passed_path).exists(), "scratch cookies file must be cleaned up after the call"
     assert cookies_file.read_text() == "# Netscape HTTP Cookie File\noriginal-content\n"
+
+
+def test_fetch_profile_reel_view_count_finds_matching_entry():
+    info = {
+        "entries": [
+            {"id": "111", "view_count": 500},
+            {"id": "222", "view_count": 7929},
+            {"id": "333", "view_count": 402000},
+        ]
+    }
+    fake_proc = _completed(["yt-dlp"], returncode=0, stdout=json.dumps(info).encode())
+    with patch("app.utils.ytdlp._run", return_value=fake_proc):
+        result = fetch_profile_reel_view_count("someaccount", "222", log=_noop_log)
+    assert result == 7929
+
+
+def test_fetch_profile_reel_view_count_missing_entry_returns_none():
+    info = {"entries": [{"id": "111", "view_count": 500}]}
+    fake_proc = _completed(["yt-dlp"], returncode=0, stdout=json.dumps(info).encode())
+    logs = []
+    with patch("app.utils.ytdlp._run", return_value=fake_proc):
+        result = fetch_profile_reel_view_count(
+            "someaccount", "999", log=lambda l, m: logs.append((l, m))
+        )
+    assert result is None
+    assert any(l == "warning" for l, _ in logs)
+
+
+def test_fetch_profile_reel_view_count_never_raises_on_failure():
+    with patch("app.utils.ytdlp._run", side_effect=RuntimeError("network blip")):
+        result = fetch_profile_reel_view_count("someaccount", "222", log=_noop_log)
+    assert result is None
+
+
+def test_fetch_profile_reel_view_count_no_username_returns_none_without_calling_ytdlp():
+    with patch("app.utils.ytdlp._run") as mock_run:
+        result = fetch_profile_reel_view_count("", "222", log=_noop_log)
+    assert result is None
+    mock_run.assert_not_called()

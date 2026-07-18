@@ -17,7 +17,14 @@ from app.pipeline.base import PipelineStep
 from app.pipeline.context import PipelineContext
 from app.pipeline.errors import PipelineFailedError
 from app.utils.disk import ensure_enough_disk
-from app.utils.ytdlp import VideoMetadata, YtDlpError, download_video, extract_comments, extract_metadata
+from app.utils.ytdlp import (
+    VideoMetadata,
+    YtDlpError,
+    download_video,
+    extract_comments,
+    extract_metadata,
+    fetch_profile_reel_view_count,
+)
 
 
 class FetchSourceStep(PipelineStep):
@@ -39,6 +46,7 @@ class FetchSourceStep(PipelineStep):
                         title=None,
                         description=None,
                         uploader=None,
+                        uploader_id=None,
                         upload_date=None,
                         view_count=None,
                         like_count=None,
@@ -126,6 +134,21 @@ class FetchSourceStep(PipelineStep):
             ctx.warning("No comments were fetched (unsupported platform, extraction failure, or none exist)")
 
         performance = self._merge(metadata, manual, comment_count_fallback=len(comments) or None)
+
+        if (
+            metadata.platform == "instagram"
+            and performance.get("view_count") is None
+            and not manual.get("view_count")
+            and metadata.uploader_id
+            and metadata.raw.get("id")
+        ):
+            fallback_views = fetch_profile_reel_view_count(
+                metadata.uploader_id, str(metadata.raw["id"]), log=ctx.log
+            )
+            if fallback_views is not None:
+                performance["view_count"] = fallback_views
+                performance["fields_from"]["view_count"] = "auto"
+
         ctx.shared["performance"] = performance
         ctx.update_job({"performance": performance})
 

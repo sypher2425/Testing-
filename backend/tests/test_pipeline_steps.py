@@ -275,6 +275,7 @@ def _fake_metadata(**overrides):
         title="Original Title",
         description="a video",
         uploader="uploader1",
+        uploader_id="uploader1",
         upload_date="2024-01-15",
         view_count=1000,
         like_count=50,
@@ -356,6 +357,40 @@ def test_fetch_source_step_url_success_merges_manual_override(tmp_path):
 
     comments = json.loads(ctx.storage.get(ctx.job_relative("performance", "comments.json")).read_bytes())
     assert comments == [{"author": "a", "text": "hi", "like_count": 1}]
+
+
+def test_fetch_source_step_backfills_instagram_view_count_from_grid_fallback(tmp_path):
+    from app.pipeline.steps.fetch_source import FetchSourceStep
+
+    ctx, _, _ = make_ctx(tmp_path, options={"performance_overrides": {}})
+    ctx.shared["source_url"] = "https://instagram.com/reel/abc123"
+    ctx.shared["original_filename"] = "https://instagram.com/reel/abc123"
+
+    ig_metadata = _fake_metadata(
+        platform="instagram",
+        view_count=None,
+        uploader="Some Account",
+        uploader_id="someaccount",
+        raw={"id": "abc123"},
+    )
+
+    def fake_download(url, dest_dir, *, log):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        path = dest_dir / "video.mp4"
+        path.write_bytes(b"fake video bytes")
+        return path
+
+    with patch("app.pipeline.steps.fetch_source.extract_metadata", return_value=ig_metadata), patch(
+        "app.pipeline.steps.fetch_source.download_video", side_effect=fake_download
+    ), patch("app.pipeline.steps.fetch_source.extract_comments", return_value=[]), patch(
+        "app.pipeline.steps.fetch_source.fetch_profile_reel_view_count", return_value=7929
+    ) as mock_fallback:
+        FetchSourceStep().run(ctx)
+
+    mock_fallback.assert_called_once_with("someaccount", "abc123", log=ctx.log)
+    perf = ctx.shared["performance"]
+    assert perf["view_count"] == 7929
+    assert perf["fields_from"]["view_count"] == "auto"
 
 
 def test_fetch_source_step_video_unavailable_fails_job(tmp_path):
