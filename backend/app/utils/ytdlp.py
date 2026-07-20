@@ -223,16 +223,17 @@ def _upload_date_iso(info: dict) -> str | None:
         return None
 
 
-def _cookies_status() -> str:
+def cookies_status() -> str:
     cookies_file = get_settings().COOKIES_FILE
     if not cookies_file:
         return "not configured"
     return "in use" if Path(cookies_file).is_file() else f"configured ({cookies_file}) but file not found"
 
 
-def extract_metadata(url: str, *, log: callable) -> VideoMetadata:
+def extract_metadata(url: str, *, log: callable, log_cookie_status: bool = True) -> VideoMetadata:
     settings = get_settings()
-    log("info", f"yt-dlp cookies: {_cookies_status()}")
+    if log_cookie_status:
+        log("info", f"yt-dlp cookies: {cookies_status()}")
     proc = _run_with_extractor_retry(
         ["--dump-single-json", "--skip-download", "--no-warnings", url],
         timeout=settings.YTDLP_METADATA_TIMEOUT_SECONDS,
@@ -257,6 +258,53 @@ def extract_metadata(url: str, *, log: callable) -> VideoMetadata:
         filesize_approx=info.get("filesize") or info.get("filesize_approx"),
         raw=info,
     )
+
+
+def search_videos(query: str, count: int, sort_mode: str, *, log: callable) -> list[dict]:
+    """Research mode: flat YouTube search via yt-dlp's ytsearch/ytsearchdate
+    pseudo-URLs (no YouTube Data API, no video downloads). Returns the flat
+    playlist entries — enough for candidate ids/urls plus cheap prefiltering;
+    authoritative metadata comes from a per-video extract_metadata() pass."""
+    prefix = "ytsearchdate" if sort_mode == "newest" else "ytsearch"
+    settings = get_settings()
+    proc = _run_with_extractor_retry(
+        ["--dump-single-json", "--flat-playlist", "--no-warnings", f"{prefix}{count}:{query}"],
+        timeout=settings.YTDLP_METADATA_TIMEOUT_SECONDS,
+        log=log,
+    )
+    info = json.loads(proc.stdout.decode(errors="replace"))
+    return list(info.get("entries") or [])
+
+
+def download_captions(url: str, dest_dir: Path, video_id: str, *, manual: bool, log: callable) -> Path | None:
+    """Download only the subtitle file for one video (never the video itself).
+    manual=True fetches creator-provided subtitles; manual=False fetches
+    auto-generated captions. Returns the subtitle file path, or None if
+    yt-dlp produced nothing."""
+    settings = get_settings()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    _run_with_extractor_retry(
+        [
+            "--skip-download",
+            "--no-playlist",
+            "--no-warnings",
+            "--write-subs" if manual else "--write-auto-subs",
+            "--sub-langs",
+            settings.RESEARCH_SUB_LANGS,
+            "--sub-format",
+            "vtt/srt/best",
+            "-o",
+            str(dest_dir / "%(id)s"),
+            url,
+        ],
+        timeout=settings.YTDLP_METADATA_TIMEOUT_SECONDS,
+        log=log,
+    )
+    for pattern in (f"{video_id}*.vtt", f"{video_id}*.srt"):
+        matches = sorted(dest_dir.glob(pattern))
+        if matches:
+            return matches[0]
+    return None
 
 
 def fetch_profile_reel_view_count(username: str, target_id: str, *, log: callable) -> int | None:

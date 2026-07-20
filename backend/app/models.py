@@ -17,7 +17,18 @@ PIPELINE_STEPS = [
     "generating_metadata",
     "zipping",
 ]
+RESEARCH_PIPELINE_STEPS = [
+    "queued",
+    "searching",
+    "fetching_captions",
+    "generating_metadata",
+    "zipping",
+]
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
+
+
+def steps_for_job_type(job_type: str | None) -> list[str]:
+    return RESEARCH_PIPELINE_STEPS if job_type == "research" else PIPELINE_STEPS
 
 
 def _uuid() -> str:
@@ -32,6 +43,7 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    job_type: Mapped[str] = mapped_column(String(16), default="video")
     original_filename: Mapped[str] = mapped_column(String(512))
     stored_source_filename: Mapped[str] = mapped_column(String(255), default="video.mp4")
     status: Mapped[str] = mapped_column(String(32), default="queued")
@@ -74,6 +86,7 @@ class Job(Base):
     def to_dict(self) -> dict:
         return {
             "job_id": self.id,
+            "job_type": self.job_type or "video",
             "original_filename": self.original_filename,
             "status": self.status,
             "current_step": self.current_step,

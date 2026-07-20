@@ -6,6 +6,7 @@ import { ApiError, createJob } from "@/lib/api";
 import JobList from "@/components/JobList";
 import ManualPerformanceFields from "@/components/ManualPerformanceFields";
 import ModeSelector from "@/components/ModeSelector";
+import ResearchForm from "@/components/ResearchForm";
 import SourceInput from "@/components/SourceInput";
 import type { CreateJobOptions, JobSource, ManualPerformanceOverrides } from "@/lib/types";
 
@@ -19,6 +20,7 @@ const DEFAULT_OPTIONS: CreateJobOptions = {
 
 export default function HomePage() {
   const router = useRouter();
+  const [appMode, setAppMode] = useState<"video" | "research">("video");
   const [source, setSource] = useState<JobSource | null>(null);
   const [options, setOptions] = useState<CreateJobOptions>(DEFAULT_OPTIONS);
   const [manualOverrides, setManualOverrides] = useState<ManualPerformanceOverrides>({});
@@ -51,39 +53,60 @@ export default function HomePage() {
       <section>
         <h1 className="mb-1 text-2xl font-semibold">Turn a video into an AI-ready dataset</h1>
         <p className="mb-6 text-sm text-slate-400">
-          Upload a video or paste a link, and get back a transcript, representative frames, and a
-          self-describing manifest.json — small enough to feed straight into an LLM's context
-          window.
+          Upload a video or paste a link for a full dataset (transcript + frames + manifest), or
+          use Research mode to turn a YouTube topic search into a transcript bundle — no video
+          downloads.
         </p>
 
-        <div className="space-y-4">
-          <SourceInput onSourceChange={setSource} disabled={uploading} />
-          <ModeSelector options={options} onChange={setOptions} />
-          <ManualPerformanceFields value={manualOverrides} onChange={setManualOverrides} />
-
-          {error && (
-            <div className="card border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>
-          )}
-
-          {uploading ? (
-            <div className="card p-4">
-              <div className="mb-2 flex justify-between text-sm">
-                <span>Uploading…</span>
-                <span>{progress}%</span>
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-surface-border">
-                <div
-                  className="h-full rounded-full bg-indigo-500 transition-all"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
-            </div>
-          ) : (
-            <button className="btn-primary w-full sm:w-auto" disabled={!source} onClick={handleUpload}>
-              {source?.kind === "url" ? "Fetch & process" : "Upload & process"}
-            </button>
-          )}
+        <div className="mb-4 inline-flex rounded-lg border border-surface-border bg-surface-raised p-1 text-sm">
+          <button
+            type="button"
+            onClick={() => setAppMode("video")}
+            className={`rounded-md px-3 py-1.5 transition-colors ${appMode === "video" ? "bg-indigo-500 text-white" : "text-slate-400 hover:text-slate-200"}`}
+          >
+            Process a video
+          </button>
+          <button
+            type="button"
+            onClick={() => setAppMode("research")}
+            className={`rounded-md px-3 py-1.5 transition-colors ${appMode === "research" ? "bg-indigo-500 text-white" : "text-slate-400 hover:text-slate-200"}`}
+          >
+            Research (transcripts)
+          </button>
         </div>
+
+        {appMode === "research" ? (
+          <ResearchForm />
+        ) : (
+          <div className="space-y-4">
+            <SourceInput onSourceChange={setSource} disabled={uploading} />
+            <ModeSelector options={options} onChange={setOptions} />
+            <ManualPerformanceFields value={manualOverrides} onChange={setManualOverrides} />
+
+            {error && (
+              <div className="card border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>
+            )}
+
+            {uploading ? (
+              <div className="card p-4">
+                <div className="mb-2 flex justify-between text-sm">
+                  <span>Uploading…</span>
+                  <span>{progress}%</span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-surface-border">
+                  <div
+                    className="h-full rounded-full bg-indigo-500 transition-all"
+                    style={{ width: `${progress}%` }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <button className="btn-primary w-full sm:w-auto" disabled={!source} onClick={handleUpload}>
+                {source?.kind === "url" ? "Fetch & process" : "Upload & process"}
+              </button>
+            )}
+          </div>
+        )}
       </section>
 
       <section>

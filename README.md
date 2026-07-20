@@ -200,6 +200,46 @@ tokens for whatever account you exported it from. Nothing requires it; leave
 `COOKIES_FILE` blank if you don't need it, and a missing/misconfigured file
 just falls back to anonymous requests rather than breaking every fetch.
 
+## Research mode (topic search → transcript bundle)
+
+The Home page's **Research (transcripts)** tab turns a YouTube topic search
+into a structured transcript bundle — for research only, so it **never
+downloads video files**, just metadata and captions.
+
+How it works, as a dedicated pipeline (`searching → fetching_captions →
+generating_metadata → zipping`) on the same job/queue/SSE machinery:
+
+1. **Search** via yt-dlp's `ytsearch{2N}:` (Top mode) or `ytsearchdate{2N}:`
+   (Newest mode) pseudo-URLs — no YouTube Data API, no API key. It
+   over-fetches ~2× the requested count, pulls full metadata per candidate,
+   applies your filters (min views / uploaded within X days / max duration),
+   sorts (Top: by views desc; Newest: by upload date desc), and keeps the
+   top N (default 15, max 25).
+2. **Captions only** per retained video: manual subtitles are preferred,
+   auto-generated captions are the fallback, and a video with neither is
+   recorded as skipped ("No captions available") — one bad video never kills
+   the job, matching the failure model everywhere else. The same pinned
+   yt-dlp + self-update-on-extractor-error + `COOKIES_FILE` infrastructure
+   is reused as-is.
+3. **Cleaning**: VTT/SRT files are converted to readable plain text —
+   timestamps, cue indices, and formatting tags stripped, the duplicated
+   rolling lines from auto captions collapsed, and the result merged into
+   paragraphs. Optimized for reading and LLM ingestion, not subtitle
+   playback. `caption_source` (`manual`/`auto`) is recorded per video so
+   downstream consumers know the fidelity.
+4. **Bundle**: everything lands in `research-manifest.json` (query, mode,
+   filters, per-video metadata, transcript paths, and per-video skip
+   reasons) plus `transcripts/{VIDEO_ID}.txt`, zipped and downloadable as
+   `research-{query-slug}-{YYYY-MM-DD}.zip`.
+
+The results page lists every video (linked title, channel, views, likes,
+date, duration), shows which got transcripts vs. why they were skipped, and
+lets you preview any transcript inline.
+
+Note: the database schema migrates automatically on startup (new columns are
+added in place via `ALTER TABLE`), so upgrading an existing deployment does
+not require deleting the data volume.
+
 ## Environment variables
 
 See `.env.example` for the full annotated list. Highlights:

@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     YTDLP_COMMENT_LIMIT: int = 100
     COOKIES_FILE: str = ""
 
+    # Research mode (topic search -> transcript bundle; never downloads video)
+    RESEARCH_MAX_RESULTS: int = 25
+    RESEARCH_SUB_LANGS: str = "en.*"
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
 

@@ -43,12 +43,17 @@ export type JobStatusValue =
   | "extracting_frames"
   | "generating_metadata"
   | "zipping"
+  | "searching"
+  | "fetching_captions"
   | "completed"
   | "failed"
   | "cancelled";
 
+export type JobType = "video" | "research";
+
 export interface JobStatusResponse {
   job_id: string;
+  job_type: JobType;
   original_filename: string;
   status: JobStatusValue;
   current_step: string;
@@ -194,3 +199,46 @@ export const PIPELINE_STEP_ORDER: { key: string; label: string }[] = [
   { key: "generating_metadata", label: "Generating metadata" },
   { key: "zipping", label: "Building ZIP archive" },
 ];
+
+export const RESEARCH_STEP_ORDER: { key: string; label: string }[] = [
+  { key: "searching", label: "Searching YouTube" },
+  { key: "fetching_captions", label: "Fetching captions" },
+  { key: "generating_metadata", label: "Generating research manifest" },
+  { key: "zipping", label: "Building ZIP archive" },
+];
+
+export interface CreateResearchJobParams {
+  query: string;
+  result_count: number;
+  sort_mode: "top" | "newest";
+  min_views?: number;
+  uploaded_within_days?: number;
+  max_duration_seconds?: number;
+}
+
+export interface ResearchVideoEntry {
+  id: string;
+  title: string | null;
+  channel: string | null;
+  views: number | null;
+  likes: number | null;
+  upload_date: string | null;
+  duration: number | null;
+  url: string | null;
+  transcript_file?: string;
+  caption_source?: "manual" | "auto";
+  skipped_reason?: string;
+}
+
+export interface ResearchManifest {
+  query: string;
+  mode: "top" | "newest";
+  filters: {
+    min_views: number | null;
+    uploaded_within_days: number | null;
+    max_duration_seconds: number | null;
+  };
+  result_count_requested: number;
+  fetched_at: string;
+  videos: ResearchVideoEntry[];
+}

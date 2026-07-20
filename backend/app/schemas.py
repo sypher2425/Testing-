@@ -36,6 +36,18 @@ class CreateJobResponse(BaseModel):
     job_id: str
 
 
+class CreateResearchJobRequest(BaseModel):
+    """Research mode: YouTube topic search -> transcript bundle. Metadata and
+    captions only; video files are never downloaded."""
+
+    query: str = Field(min_length=1, max_length=300)
+    result_count: int = Field(default=15, ge=1, le=25)
+    sort_mode: Literal["top", "newest"] = "top"
+    min_views: int | None = Field(default=None, ge=0)
+    uploaded_within_days: int | None = Field(default=None, ge=1, le=3650)
+    max_duration_seconds: int | None = Field(default=None, ge=1)
+
+
 class VideoProperties(BaseModel):
     duration_seconds: float | None = None
     width: int | None = None
@@ -53,6 +65,7 @@ class JobError(BaseModel):
 
 class JobStatusResponse(BaseModel):
     job_id: str
+    job_type: str = "video"
     original_filename: str
     status: str
     current_step: str

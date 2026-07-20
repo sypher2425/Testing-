@@ -1,6 +1,7 @@
 import type {
   CreateJobOptions,
   CreateJobResponse,
+  CreateResearchJobParams,
   ErrorEnvelope,
   FrameListResponse,
   JobListResponse,
@@ -9,6 +10,7 @@ import type {
   LogsResponse,
   Manifest,
   ManualPerformanceOverrides,
+  ResearchManifest,
   TranscriptJSON,
 } from "./types";
 
@@ -161,6 +163,24 @@ export function frameUrl(jobId: string, filename: string): string {
 export async function getManifest(jobId: string): Promise<Manifest> {
   const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/manifest`, { cache: "no-store" });
   return handleResponse<Manifest>(res);
+}
+
+export async function createResearchJob(params: CreateResearchJobParams): Promise<CreateJobResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/jobs/research`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  return handleResponse<CreateJobResponse>(res);
+}
+
+export async function getResearchManifest(jobId: string): Promise<ResearchManifest> {
+  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/manifest`, { cache: "no-store" });
+  return handleResponse<ResearchManifest>(res);
+}
+
+export function researchTranscriptUrl(jobId: string, videoId: string): string {
+  return `${API_BASE_URL}/api/jobs/${jobId}/research-transcript/${encodeURIComponent(videoId)}`;
 }
 
 export async function getLogs(jobId: string, sinceId = 0): Promise<LogsResponse> {

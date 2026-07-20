@@ -153,3 +153,52 @@ def test_create_job_with_url_succeeds_and_defers_probe(client):
     body = status_resp.json()
     assert body["source_url"] == "https://youtu.be/xyz"
     assert body["status"] == "queued"
+    assert body["job_type"] == "video"
+
+
+def test_create_research_job_succeeds_and_enqueues(client):
+    with patch("app.tasks.process_job.delay") as mock_delay:
+        resp = client.post(
+            "/api/jobs/research",
+            json={"query": "roblox animation tips", "result_count": 10, "sort_mode": "newest", "min_views": 1000},
+        )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    mock_delay.assert_called_once_with(job_id)
+
+    status_resp = client.get(f"/api/jobs/{job_id}")
+    body = status_resp.json()
+    assert body["job_type"] == "research"
+    assert body["mode"] == "research"
+    assert body["original_filename"] == "Research: roblox animation tips"
+    assert body["options"]["research"]["sort_mode"] == "newest"
+
+
+def test_create_research_job_rejects_bad_params(client):
+    resp = client.post("/api/jobs/research", json={"query": "", "result_count": 10})
+    assert resp.status_code == 422
+    resp = client.post("/api/jobs/research", json={"query": "x", "result_count": 26})
+    assert resp.status_code == 422
+    resp = client.post("/api/jobs/research", json={"query": "x", "sort_mode": "views"})
+    assert resp.status_code == 422
+
+
+def test_research_job_download_rejects_non_zip_assets(client):
+    with patch("app.tasks.process_job.delay"):
+        resp = client.post("/api/jobs/research", json={"query": "test topic"})
+    job_id = resp.json()["job_id"]
+
+    from app.database import get_session
+    from app.models import Job
+
+    session = get_session()
+    try:
+        job = session.get(Job, job_id)
+        job.status = "completed"
+        session.commit()
+    finally:
+        session.close()
+
+    resp = client.get(f"/api/jobs/{job_id}/download?asset=frames")
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "bad_request"

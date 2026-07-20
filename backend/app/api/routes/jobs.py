@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import tempfile
 import uuid
 import zipfile
@@ -18,7 +19,14 @@ from app.api.deps import db_session
 from app.config import Settings, get_settings
 from app.errors import AppError, bad_request, insufficient_storage, not_found, unprocessable
 from app.models import TERMINAL_STATES, Job, JobLog
-from app.schemas import CreateJobOptions, CreateJobResponse, FrameListResponse, JobListResponse, JobStatusResponse
+from app.schemas import (
+    CreateJobOptions,
+    CreateJobResponse,
+    CreateResearchJobRequest,
+    FrameListResponse,
+    JobListResponse,
+    JobStatusResponse,
+)
 from app.storage import get_storage
 from app.storage.base import StorageBackend
 from app.utils.disk import ensure_enough_disk
@@ -247,6 +255,40 @@ async def create_job(
     return CreateJobResponse(job_id=job_id)
 
 
+@router.post("/research", status_code=202, response_model=CreateJobResponse)
+def create_research_job(
+    body: CreateResearchJobRequest,
+    db: Session = Depends(db_session),
+    settings: Settings = Depends(get_settings),
+) -> CreateJobResponse:
+    try:
+        ensure_enough_disk(str(settings.data_path), incoming_mb=0)
+    except ValueError as exc:
+        raise insufficient_storage(str(exc)) from exc
+
+    job_id = str(uuid.uuid4())
+    job = Job(
+        id=job_id,
+        job_type="research",
+        original_filename=f"Research: {body.query.strip()}"[:512],
+        stored_source_filename="",
+        status="queued",
+        current_step="queued",
+        mode="research",
+        options={"research": body.model_dump(mode="json")},
+        step_progress={},
+        last_heartbeat=datetime.now(timezone.utc),
+    )
+    db.add(job)
+    db.commit()
+
+    from app.tasks import process_job
+
+    process_job.delay(job_id)
+
+    return CreateJobResponse(job_id=job_id)
+
+
 @router.get("", response_model=JobListResponse)
 def list_jobs(
     page: int = Query(1, ge=1),
@@ -403,12 +445,33 @@ def get_manifest(
     db: Session = Depends(db_session),
     storage: StorageBackend = Depends(get_storage),
 ) -> Response:
-    _get_job_or_404(db, job_id)
-    rel = f"{job_id}/manifest.json"
+    job = _get_job_or_404(db, job_id)
+    manifest_name = "research-manifest.json" if job.job_type == "research" else "manifest.json"
+    rel = f"{job_id}/{manifest_name}"
     if not storage.exists(rel):
-        raise not_found(f"manifest.json not available yet for job {job_id}")
+        raise not_found(f"{manifest_name} not available yet for job {job_id}")
     data = storage.get(rel).read_bytes()
     return Response(content=data, media_type="application/json")
+
+
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+@router.get("/{job_id}/research-transcript/{video_id}")
+def get_research_transcript(
+    job_id: str,
+    video_id: str,
+    db: Session = Depends(db_session),
+    storage: StorageBackend = Depends(get_storage),
+) -> Response:
+    _get_job_or_404(db, job_id)
+    if not _VIDEO_ID_RE.match(video_id):
+        raise bad_request("Invalid video id")
+    rel = f"{job_id}/transcripts/{video_id}.txt"
+    if not storage.exists(rel):
+        raise not_found(f"No transcript for video {video_id}")
+    data = storage.get(rel).read_bytes()
+    return Response(content=data, media_type="text/plain; charset=utf-8")
 
 
 @router.get("/{job_id}/frames", response_model=FrameListResponse)
@@ -458,19 +521,31 @@ def download(
     if job.status != "completed":
         raise bad_request(f"Job {job_id} is not completed yet (status={job.status})")
 
+    if job.job_type == "research" and asset != "zip":
+        raise bad_request("Research jobs only support asset=zip")
+
     if asset == "zip":
         rel = f"{job_id}/output.zip"
         if not storage.exists(rel):
             raise not_found("output.zip not found")
         path = storage.get(rel)
-        return FileResponse(
-            path, media_type="application/zip", filename=f"{job_id}-dataset.zip"
-        )
+        if job.job_type == "research":
+            query = ((job.options or {}).get("research") or {}).get("query", "research")
+            stamp = (job.completed_at or job.created_at).date().isoformat()
+            download_name = f"research-{_slugify(query)}-{stamp}.zip"
+        else:
+            download_name = f"{job_id}-dataset.zip"
+        return FileResponse(path, media_type="application/zip", filename=download_name)
 
     if asset == "transcript":
         return _zip_subset(job_id, storage, ["transcript"], f"{job_id}-transcript.zip")
 
     return _zip_subset(job_id, storage, ["frames", "metadata/frames.json"], f"{job_id}-frames.zip")
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:40] or "query"
 
 
 def _zip_subset(job_id: str, storage: StorageBackend, rel_entries: list[str], download_name: str) -> Response:

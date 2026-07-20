@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { cancelOrDeleteJob } from "@/lib/api";
-import { PIPELINE_STEP_ORDER, TERMINAL_STATES, type JobStatusResponse } from "@/lib/types";
+import {
+  PIPELINE_STEP_ORDER,
+  RESEARCH_STEP_ORDER,
+  TERMINAL_STATES,
+  type JobStatusResponse,
+} from "@/lib/types";
 import JobLogPanel from "./JobLogPanel";
 import StatusChip from "./StatusChip";
 
@@ -34,6 +39,7 @@ function formatElapsed(seconds: number): string {
 export default function ProcessingView({ job }: { job: JobStatusResponse }) {
   const elapsed = useElapsed(job.started_at, job.completed_at);
   const [cancelling, setCancelling] = useState(false);
+  const stepOrder = job.job_type === "research" ? RESEARCH_STEP_ORDER : PIPELINE_STEP_ORDER;
 
   async function handleCancel() {
     if (cancelling) return;
@@ -72,7 +78,7 @@ export default function ProcessingView({ job }: { job: JobStatusResponse }) {
         </div>
 
         <ol className="space-y-3">
-          {PIPELINE_STEP_ORDER.map((step) => {
+          {stepOrder.map((step) => {
             const pct = job.step_progress[step.key] ?? 0;
             const isCurrent = job.current_step === step.key;
             const isDone = pct >= 100;

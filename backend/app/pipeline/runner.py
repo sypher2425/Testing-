@@ -19,14 +19,29 @@ from app.storage import get_storage
 logger = logging.getLogger("pipeline.runner")
 
 
-def _build_pipeline() -> list:
+def _build_pipeline(job_type: str = "video") -> list:
     # Imported lazily to avoid circular imports at module load time.
+    from app.pipeline.steps.zip_output import ZipOutputStep
+
+    if job_type == "research":
+        from app.pipeline.steps.research import (
+            ResearchCaptionsStep,
+            ResearchManifestStep,
+            ResearchSearchStep,
+        )
+
+        return [
+            ResearchSearchStep(),
+            ResearchCaptionsStep(),
+            ResearchManifestStep(),
+            ZipOutputStep(),
+        ]
+
     from app.pipeline.steps.extract_frames import ExtractFramesStep
     from app.pipeline.steps.fetch_source import FetchSourceStep
     from app.pipeline.steps.generate_metadata import GenerateMetadataStep
     from app.pipeline.steps.probe import ProbeStep
     from app.pipeline.steps.transcribe import TranscribeStep
-    from app.pipeline.steps.zip_output import ZipOutputStep
 
     return [
         FetchSourceStep(),
@@ -56,7 +71,7 @@ def run_pipeline(job_id: str) -> None:
         progress[step_name] = max(0, min(100, pct))
         job.step_progress = progress
         job.current_step = step_name
-        job.overall_progress = _overall_progress(progress)
+        job.overall_progress = _overall_progress(progress, job.job_type)
         job.last_heartbeat = datetime.now(timezone.utc)
         db.commit()
 
@@ -77,7 +92,8 @@ def run_pipeline(job_id: str) -> None:
     if job is None:
         return
 
-    pipeline = _build_pipeline()
+    job_type = job.job_type or "video"
+    pipeline = _build_pipeline(job_type)
 
     job.status = pipeline[0].name if pipeline else "queued"
     job.started_at = datetime.now(timezone.utc)
@@ -93,6 +109,7 @@ def run_pipeline(job_id: str) -> None:
         should_cancel=should_cancel,
         update_job=update_job,
     )
+    ctx.shared["job_type"] = job_type
     ctx.shared["mode"] = job.mode
     ctx.shared["original_filename"] = job.original_filename
     ctx.shared["stored_source_filename"] = job.stored_source_filename
@@ -162,10 +179,10 @@ def run_pipeline(job_id: str) -> None:
         db.close()
 
 
-def _overall_progress(step_progress: dict[str, int]) -> int:
-    from app.models import PIPELINE_STEPS
+def _overall_progress(step_progress: dict[str, int], job_type: str | None = "video") -> int:
+    from app.models import steps_for_job_type
 
-    weighted_steps = [s for s in PIPELINE_STEPS if s != "queued"]
+    weighted_steps = [s for s in steps_for_job_type(job_type) if s != "queued"]
     if not weighted_steps:
         return 0
     total = sum(step_progress.get(s, 0) for s in weighted_steps)
