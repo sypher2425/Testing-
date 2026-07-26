@@ -169,8 +169,9 @@ def test_extract_frames_skips_one_bad_frame_instead_of_failing_job(tmp_path):
     assert ctx.shared["frame_count"] == 3
     assert shared_state["frame_count"] == 3
     assert any("skipped" in msg.lower() or "skipping" in msg.lower() for _, msg in logs)
-    # Remaining frames are renumbered contiguously.
-    assert [f["frame"] for f in ctx.shared["frames"]] == [0, 1, 2]
+    # Remaining adaptive frames are renumbered contiguously.
+    adaptive = [f for f in ctx.shared["frames"] if f["category"] == "adaptive"]
+    assert [f["frame"] for f in adaptive] == [0, 1, 2]
 
 
 def test_extract_frames_raises_when_every_frame_fails(tmp_path):
@@ -214,8 +215,13 @@ def test_extract_frames_adaptive_mode_uses_scene_detection(tmp_path):
         extract_frames_module.ExtractFramesStep().run(ctx)
 
     assert ctx.shared["frame_count"] >= 30
-    assert all(f["mode"] == "adaptive" for f in ctx.shared["frames"])
-    assert all("scene_id" in f for f in ctx.shared["frames"])
+    adaptive = [f for f in ctx.shared["frames"] if f["category"] == "adaptive"]
+    assert all(f["mode"] == "adaptive" for f in adaptive)
+    assert all("scene_id" in f for f in adaptive)
+    # v2: dense opening frames are extracted alongside (default 8s / 0.25s).
+    dense = [f for f in ctx.shared["frames"] if f["category"] == "opening_dense"]
+    assert len(dense) == 32
+    assert all(f["image"].startswith("opening_dense/") for f in dense)
 
 
 def test_generate_metadata_step_writes_manifest(tmp_path):
@@ -337,26 +343,59 @@ def test_fetch_source_step_url_success_merges_manual_override(tmp_path):
         path.write_bytes(b"fake video bytes")
         return path
 
+    fake_extraction = {
+        "status": "success",
+        "reason": None,
+        "error": None,
+        "platform_comment_count": 3,
+        "extracted_comment_count": 1,
+        "attempted_at": "2026-07-18T00:00:00+00:00",
+        "comments": [
+            {
+                "id": "c1",
+                "text": "hi",
+                "author": "a",
+                "author_id": None,
+                "like_count": 1,
+                "reply_count": None,
+                "timestamp": None,
+                "is_pinned": None,
+                "author_is_uploader": None,
+            }
+        ],
+    }
     with patch("app.pipeline.steps.fetch_source.extract_metadata", return_value=_fake_metadata()), patch(
         "app.pipeline.steps.fetch_source.download_video", side_effect=fake_download
-    ), patch("app.pipeline.steps.fetch_source.extract_comments", return_value=[{"author": "a", "text": "hi", "like_count": 1}]):
+    ), patch("app.pipeline.steps.fetch_source.extract_comments", return_value=fake_extraction):
         FetchSourceStep().run(ctx)
 
     assert ctx.shared["stored_source_filename"] == "video.mp4"
     assert ctx.storage.exists(ctx.shared["source_relative_path"])
+    assert ctx.shared["source_sha256"] == shared_state["source_sha256"]
+    assert len(shared_state["source_sha256"]) == 64
 
     perf = ctx.shared["performance"]
     assert perf["title"] == "Overridden Title"  # manual wins
     assert perf["fields_from"]["title"] == "manual"
     assert perf["view_count"] == 1000  # auto value, no manual override given
     assert perf["fields_from"]["view_count"] == "auto"
+    assert perf["fields_status"]["view_count"] == {"status": "success", "source": "auto"}
     assert perf["platform"] == "youtube"
 
-    # original_filename should be updated to the resolved title since no manual title override... wait manual title WAS given, so that's used.
+    # original_filename should be updated to the manual title override.
     assert shared_state["original_filename"] == "Overridden Title"
 
-    comments = json.loads(ctx.storage.get(ctx.job_relative("performance", "comments.json")).read_bytes())
-    assert comments == [{"author": "a", "text": "hi", "like_count": 1}]
+    # Legacy v1 file keeps the old simple shape.
+    legacy = json.loads(ctx.storage.get(ctx.job_relative("performance", "comments.json")).read_bytes())
+    assert legacy == [{"author": "a", "text": "hi", "like_count": 1, "timestamp": None}]
+    # v2 files carry the full comments + explicit extraction outcome.
+    top = json.loads(ctx.storage.get(ctx.job_relative("comments", "top_comments.json")).read_bytes())
+    assert top[0]["id"] == "c1"
+    extraction_status = json.loads(
+        ctx.storage.get(ctx.job_relative("comments", "extraction_status.json")).read_bytes()
+    )
+    assert extraction_status["status"] == "success"
+    assert "comments" not in extraction_status
 
 
 def test_fetch_source_step_backfills_instagram_view_count_from_grid_fallback(tmp_path):
@@ -380,9 +419,18 @@ def test_fetch_source_step_backfills_instagram_view_count_from_grid_fallback(tmp
         path.write_bytes(b"fake video bytes")
         return path
 
+    empty_extraction = {
+        "status": "extraction_failed",
+        "reason": "zero_results_unexpected",
+        "error": "none returned",
+        "platform_comment_count": 5,
+        "extracted_comment_count": 0,
+        "attempted_at": "2026-07-18T00:00:00+00:00",
+        "comments": [],
+    }
     with patch("app.pipeline.steps.fetch_source.extract_metadata", return_value=ig_metadata), patch(
         "app.pipeline.steps.fetch_source.download_video", side_effect=fake_download
-    ), patch("app.pipeline.steps.fetch_source.extract_comments", return_value=[]), patch(
+    ), patch("app.pipeline.steps.fetch_source.extract_comments", return_value=empty_extraction), patch(
         "app.pipeline.steps.fetch_source.fetch_profile_reel_view_count", return_value=7929
     ) as mock_fallback:
         FetchSourceStep().run(ctx)
@@ -391,6 +439,7 @@ def test_fetch_source_step_backfills_instagram_view_count_from_grid_fallback(tmp
     perf = ctx.shared["performance"]
     assert perf["view_count"] == 7929
     assert perf["fields_from"]["view_count"] == "auto"
+    assert perf["fields_status"]["view_count"]["status"] == "success"
 
 
 def test_fetch_source_step_video_unavailable_fails_job(tmp_path):

@@ -101,6 +101,37 @@ export interface FrameMeta {
   image: string;
   mode: string;
   scene_id?: number | null;
+  // Dataset v2 (absent on v1 datasets)
+  category?: "adaptive" | "opening_dense" | "key_event" | null;
+  extraction_reason?: string | null;
+  event_id?: string | null;
+  transcript_segment_index?: number | null;
+  phash?: string | null;
+}
+
+/** Dataset v2: uniform {value, status, source} record for any field that may
+ * be unavailable — value is never fabricated, absence always carries a reason. */
+export interface FieldResult<T = unknown> {
+  value: T | null;
+  status: string;
+  source?: string | null;
+  reason?: string;
+  error?: string;
+}
+
+export interface FieldStatus {
+  status: string;
+  source?: string | null;
+  reason?: string;
+}
+
+export interface CommentExtractionStatus {
+  status: string;
+  reason?: string | null;
+  error?: string | null;
+  platform_comment_count?: number | null;
+  extracted_comment_count?: number;
+  attempted_at?: string | null;
 }
 
 export interface FrameListResponse {
@@ -136,6 +167,8 @@ export interface PerformanceData {
   share_count: number | null;
   hashtags: string[];
   fields_from: Record<string, "auto" | "manual">;
+  /** Dataset v2: per-metric status explaining every null (absent on v1). */
+  fields_status?: Record<string, FieldStatus>;
 }
 
 export interface Manifest {
@@ -152,6 +185,16 @@ export interface Manifest {
   processing: Record<string, string | null>;
   performance: PerformanceData | null;
   analyses: Record<string, unknown>;
+  // Dataset v2 (all optional — absent on v1 datasets)
+  dataset_schema_version?: string;
+  source_video_sha256?: string | null;
+  frame_counts?: Record<string, number>;
+  extraction_report?: { stage: string; status: string; started_at: string; completed_at: string | null; error: string | null }[];
+  posting_context?: Record<string, FieldResult>;
+  content?: Record<string, FieldStatus>;
+  comments?: CommentExtractionStatus | null;
+  events_count?: number;
+  analysis_summary?: Record<string, FieldResult>;
 }
 
 /** Optional manual performance fields a user can supply at upload time —

@@ -56,6 +56,7 @@ class Job(Base):
 
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     performance: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    source_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)

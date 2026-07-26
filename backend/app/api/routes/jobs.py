@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -117,6 +118,10 @@ async def create_job(
     manual_comment_count: int | None = Form(None),
     manual_share_count: int | None = Form(None),
     manual_hashtags: str | None = Form(None),
+    opening_dense_enabled: bool = Form(True),
+    opening_dense_duration: float | None = Form(None),
+    opening_dense_interval: float | None = Form(None),
+    events: str | None = Form(None),
     db: Session = Depends(db_session),
     settings: Settings = Depends(get_settings),
     storage: StorageBackend = Depends(get_storage),
@@ -128,9 +133,21 @@ async def create_job(
             target_frames=target_frames,
             frame_format=frame_format,
             frame_max_dim=frame_max_dim,
+            opening_dense_enabled=opening_dense_enabled,
+            opening_dense_duration=opening_dense_duration,
+            opening_dense_interval=opening_dense_interval,
         )
     except ValidationError as exc:
         raise unprocessable("Invalid job options", json.loads(exc.json())) from exc
+
+    parsed_events: list = []
+    if events:
+        try:
+            parsed_events = json.loads(events)
+            if not isinstance(parsed_events, list):
+                raise ValueError("events must be a JSON array")
+        except ValueError as exc:
+            raise unprocessable(f"Invalid events JSON: {exc}") from exc
 
     has_file = file is not None and bool(file.filename)
     has_url = bool(url and url.strip())
@@ -152,6 +169,7 @@ async def create_job(
     )
     options_dict = options.model_dump(mode="json")
     options_dict["performance_overrides"] = performance_overrides
+    options_dict["events"] = parsed_events
 
     job_id = str(uuid.uuid4())
 
@@ -201,6 +219,7 @@ async def create_job(
 
         max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
         total_bytes = 0
+        hasher = hashlib.sha256()
         try:
             with open(dest_path, "wb") as out:
                 while True:
@@ -212,6 +231,7 @@ async def create_job(
                         raise unprocessable(
                             f"Upload exceeds MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB}MB)"
                         )
+                    hasher.update(chunk)
                     out.write(chunk)
         except AppError:
             storage.delete(job_id)
@@ -233,6 +253,11 @@ async def create_job(
                 exc.to_detail(),
             ) from exc
 
+        source_sha256 = hasher.hexdigest()
+        duplicate = (
+            db.query(Job).filter(Job.source_sha256 == source_sha256).order_by(Job.created_at.desc()).first()
+        )
+
         job = Job(
             id=job_id,
             original_filename=sanitize_filename(file.filename),
@@ -242,10 +267,22 @@ async def create_job(
             mode=options.mode.value,
             options=options_dict,
             file_size_bytes=total_bytes,
+            source_sha256=source_sha256,
             step_progress={},
             last_heartbeat=datetime.now(timezone.utc),
         )
         db.add(job)
+        if duplicate is not None:
+            db.add(
+                JobLog(
+                    job_id=job_id,
+                    level="warning",
+                    message=(
+                        f"This source video is byte-identical to job {duplicate.id} "
+                        f"({duplicate.original_filename!r}) — you may be processing the same dataset twice."
+                    ),
+                )
+            )
         db.commit()
 
     from app.tasks import process_job
@@ -479,6 +516,7 @@ def list_frames(
     job_id: str,
     page: int = Query(1, ge=1),
     page_size: int = Query(40, ge=1, le=200),
+    category: str = Query("adaptive", pattern="^(adaptive|opening_dense|key_event|all)$"),
     db: Session = Depends(db_session),
     storage: StorageBackend = Depends(get_storage),
 ) -> FrameListResponse:
@@ -487,6 +525,9 @@ def list_frames(
     if not storage.exists(rel):
         return FrameListResponse(frames=[], total=0, page=page, page_size=page_size)
     frames = json.loads(storage.get(rel).read_bytes())
+    if category != "all":
+        # v1 datasets have no category key — every frame was adaptive.
+        frames = [f for f in frames if f.get("category", "adaptive") == category]
     total = len(frames)
     start = (page - 1) * page_size
     page_items = frames[start : start + page_size]
@@ -506,6 +547,30 @@ def get_frame(
     rel = f"{job_id}/frames/{filename}"
     if not storage.exists(rel):
         raise not_found(f"Frame {filename} not found for job {job_id}")
+    data = storage.get(rel).read_bytes()
+    return Response(content=data, media_type=_content_type_for(filename))
+
+
+_FRAME_SUBDIRS = {"opening_dense", "key_events"}
+
+
+@router.get("/{job_id}/frames/{subdir}/{filename}")
+def get_frame_in_subdir(
+    job_id: str,
+    subdir: str,
+    filename: str,
+    db: Session = Depends(db_session),
+    storage: StorageBackend = Depends(get_storage),
+) -> Response:
+    """Serves the v2 frame groups (frames/opening_dense/, frames/key_events/)."""
+    _get_job_or_404(db, job_id)
+    if subdir not in _FRAME_SUBDIRS:
+        raise bad_request(f"Unknown frame group '{subdir}'")
+    if not is_safe_relative_path(filename) or "/" in filename:
+        raise bad_request("Invalid frame filename")
+    rel = f"{job_id}/frames/{subdir}/{filename}"
+    if not storage.exists(rel):
+        raise not_found(f"Frame {subdir}/{filename} not found for job {job_id}")
     data = storage.get(rel).read_bytes()
     return Response(content=data, media_type=_content_type_for(filename))
 

@@ -31,12 +31,17 @@ export default function PerformancePanel({ jobId }: { jobId: string }) {
   const performance = manifest?.performance;
   if (!performance) return null;
 
-  const stats: { label: string; value: string }[] = [
-    { label: "Views", value: formatCount(performance.view_count) },
-    { label: "Likes", value: formatCount(performance.like_count) },
-    { label: "Comments", value: formatCount(performance.comment_count) },
-    { label: "Shares", value: formatCount(performance.share_count) },
+  const fieldsStatus = performance.fields_status ?? {};
+  const stats: { label: string; key: string; value: string }[] = [
+    { label: "Views", key: "view_count", value: formatCount(performance.view_count) },
+    { label: "Likes", key: "like_count", value: formatCount(performance.like_count) },
+    { label: "Comments", key: "comment_count", value: formatCount(performance.comment_count) },
+    { label: "Shares", key: "share_count", value: formatCount(performance.share_count) },
   ];
+  const missingWithReason = stats.filter(
+    (s) => s.value === "—" && fieldsStatus[s.key]?.reason
+  );
+  const commentStatus = manifest?.comments;
 
   return (
     <div className="card p-4">
@@ -49,12 +54,29 @@ export default function PerformancePanel({ jobId }: { jobId: string }) {
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {stats.map((s) => (
-          <div key={s.label}>
+          <div key={s.label} title={s.value === "—" ? fieldsStatus[s.key]?.reason : undefined}>
             <dt className="text-xs text-slate-500">{s.label}</dt>
             <dd className="text-lg font-semibold">{s.value}</dd>
           </div>
         ))}
       </div>
+
+      {missingWithReason.length > 0 && (
+        <div className="mt-3 space-y-0.5 text-xs text-slate-500">
+          {missingWithReason.map((s) => (
+            <p key={s.key}>
+              <span className="text-amber-400/80">{s.label} unavailable:</span> {fieldsStatus[s.key]?.reason}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {commentStatus && commentStatus.status !== "success" && (
+        <p className="mt-2 text-xs text-slate-500">
+          <span className="text-amber-400/80">Comment extraction ({commentStatus.status}):</span>{" "}
+          {commentStatus.error ?? commentStatus.reason ?? "no detail"}
+        </p>
+      )}
 
       {(performance.uploader || performance.upload_date) && (
         <p className="mt-3 text-xs text-slate-500">

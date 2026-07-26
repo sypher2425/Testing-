@@ -2,6 +2,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -51,8 +52,16 @@ class Settings(BaseSettings):
     YTDLP_TIMEOUT_SECONDS: int = 1800
     YTDLP_METADATA_TIMEOUT_SECONDS: int = 120
     YTDLP_UPDATE_TIMEOUT_SECONDS: int = 120
-    YTDLP_COMMENT_LIMIT: int = 100
+    # MAX_COMMENTS is accepted as an alias for backward/forward compatibility.
+    YTDLP_COMMENT_LIMIT: int = Field(
+        default=100, validation_alias=AliasChoices("YTDLP_COMMENT_LIMIT", "MAX_COMMENTS")
+    )
     COOKIES_FILE: str = ""
+
+    # Dense opening frames (dataset schema v2): every OPENING_DENSE_INTERVAL
+    # seconds during the first OPENING_DENSE_DURATION seconds of the video.
+    OPENING_DENSE_DURATION: float = 8.0
+    OPENING_DENSE_INTERVAL: float = 0.25
 
     # Research mode (topic search -> transcript bundle; never downloads video)
     RESEARCH_MAX_RESULTS: int = 25

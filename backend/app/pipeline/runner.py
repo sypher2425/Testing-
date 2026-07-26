@@ -115,6 +115,7 @@ def run_pipeline(job_id: str) -> None:
     ctx.shared["stored_source_filename"] = job.stored_source_filename
     ctx.shared["source_relative_path"] = ctx.job_relative("source", job.stored_source_filename)
     ctx.shared["source_url"] = job.source_url
+    ctx.shared["source_sha256"] = job.source_sha256
     ctx.shared["started_at"] = job.started_at.isoformat() if job.started_at else None
 
     persist_log("info", f"Starting pipeline for job {job_id} (mode={job.mode})")
@@ -131,7 +132,23 @@ def run_pipeline(job_id: str) -> None:
             db.commit()
             persist_log("info", f"Step started: {step.label}")
             t0 = time.monotonic()
-            step.run(ctx)
+            stage_report = {
+                "stage": step.name,
+                "status": "success",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": None,
+                "error": None,
+            }
+            try:
+                step.run(ctx)
+            except Exception as exc:
+                stage_report["status"] = "extraction_failed"
+                stage_report["error"] = str(exc)
+                stage_report["completed_at"] = datetime.now(timezone.utc).isoformat()
+                ctx.shared.setdefault("stage_reports", []).append(stage_report)
+                raise
+            stage_report["completed_at"] = datetime.now(timezone.utc).isoformat()
+            ctx.shared.setdefault("stage_reports", []).append(stage_report)
             set_step_progress(step.name, 100)
             persist_log("info", f"Step finished: {step.label} ({time.monotonic() - t0:.1f}s)")
 

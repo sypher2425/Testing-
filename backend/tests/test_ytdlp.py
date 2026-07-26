@@ -135,29 +135,79 @@ def test_self_update_pip_timeout_falls_back_without_raising():
     assert any("failed" in m.lower() for _, m in logs)
 
 
-def test_extract_comments_best_effort_returns_empty_on_failure():
+def test_extract_comments_failure_returns_typed_status_not_bare_empty():
     logs = []
     with patch("app.utils.ytdlp._run", side_effect=RuntimeError("boom")):
         result = extract_comments("https://example.com/v", limit=100, log=lambda l, m: logs.append((l, m)))
-    assert result == []
+    assert result["status"] == "extraction_failed"
+    assert result["comments"] == []
+    assert result["error"] == "boom"
+    assert result["attempted_at"]
     assert any(l == "warning" for l, _ in logs)
 
 
-def test_extract_comments_sorts_by_likes_and_caps_limit():
+def test_extract_comments_sorts_by_likes_caps_limit_and_counts_replies():
     info = {
         "comments": [
-            {"author": "a", "text": "hi", "like_count": 3, "timestamp": 1},
-            {"author": "b", "text": "great!", "like_count": 50, "timestamp": 2},
-            {"author": "c", "text": "meh", "like_count": 10, "timestamp": 3},
+            {"id": "c1", "author": "a", "text": "hi", "like_count": 3, "timestamp": 1, "parent": "root"},
+            {"id": "c2", "author": "b", "text": "great!", "like_count": 50, "timestamp": 2, "parent": "root"},
+            {"id": "c3", "author": "c", "text": "meh", "like_count": 10, "timestamp": 3, "parent": "root"},
+            {"id": "c4", "author": "d", "text": "reply", "like_count": 1, "timestamp": 4, "parent": "c2"},
         ]
     }
     fake_proc = _completed(["yt-dlp"], returncode=0, stdout=json.dumps(info).encode())
     with patch("app.utils.ytdlp._run", return_value=fake_proc):
         result = extract_comments("https://example.com/v", limit=2, log=_noop_log)
 
-    assert len(result) == 2
-    assert result[0]["like_count"] == 50
-    assert result[1]["like_count"] == 10
+    assert result["status"] == "success"
+    assert result["extracted_comment_count"] == 2
+    comments = result["comments"]
+    assert comments[0]["like_count"] == 50
+    assert comments[0]["reply_count"] == 1  # c4 replies to c2
+    assert comments[1]["like_count"] == 10
+    # Replies themselves are not listed as top-level comments.
+    assert all(c["id"] != "c4" for c in comments)
+
+
+def test_extract_comments_tiktok_is_unsupported_without_attempting():
+    with patch("app.utils.ytdlp._run") as mock_run:
+        result = extract_comments("https://tiktok.com/v", limit=10, log=_noop_log, platform="tiktok")
+    assert result["status"] == "unsupported"
+    mock_run.assert_not_called()
+
+
+def test_extract_comments_zero_results_with_platform_count_is_flagged():
+    fake_proc = _completed(["yt-dlp"], returncode=0, stdout=json.dumps({"comments": []}).encode())
+    with patch("app.utils.ytdlp._run", return_value=fake_proc):
+        result = extract_comments(
+            "https://instagram.com/reel/x", limit=10, log=_noop_log,
+            platform="instagram", platform_comment_count=378,
+        )
+    assert result["status"] == "extraction_failed"
+    assert result["reason"] == "zero_results_unexpected"
+    assert result["platform_comment_count"] == 378
+
+
+def test_extract_comments_auth_and_rate_limit_classification():
+    auth_proc = _completed(["yt-dlp"], returncode=1, stderr=b"ERROR: login required to view comments")
+    with patch("app.utils.ytdlp._run", return_value=auth_proc):
+        result = extract_comments("https://instagram.com/reel/x", limit=10, log=_noop_log, platform="instagram")
+    assert result["status"] == "authentication_required"
+
+    rl_proc = _completed(["yt-dlp"], returncode=1, stderr=b"ERROR: rate-limit reached, try again later")
+    with patch("app.utils.ytdlp._run", return_value=rl_proc):
+        result = extract_comments("https://instagram.com/reel/x", limit=10, log=_noop_log, platform="instagram")
+    assert result["status"] == "rate_limited"
+
+
+def test_extract_comments_no_comments_exist_is_a_clean_success():
+    fake_proc = _completed(["yt-dlp"], returncode=0, stdout=json.dumps({"comments": []}).encode())
+    with patch("app.utils.ytdlp._run", return_value=fake_proc):
+        result = extract_comments(
+            "https://youtu.be/x", limit=10, log=_noop_log, platform="youtube", platform_comment_count=0
+        )
+    assert result["status"] == "success"
+    assert result["reason"] == "no_comments_exist"
 
 
 def test_run_copies_cookies_to_scratch_and_leaves_original_untouched(tmp_path):

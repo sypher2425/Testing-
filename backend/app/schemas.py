@@ -23,6 +23,10 @@ class CreateJobOptions(BaseModel):
     target_frames: int = Field(default=80, ge=10, le=500)
     frame_format: FrameFormat = FrameFormat.jpeg
     frame_max_dim: int = Field(default=1280, ge=64, le=7680)
+    # Dataset v2: dense sampling of the opening seconds (None = env default)
+    opening_dense_enabled: bool = True
+    opening_dense_duration: float | None = Field(default=None, ge=1, le=60)
+    opening_dense_interval: float | None = Field(default=None, ge=0.05, le=5)
 
     @field_validator("interval_ms")
     @classmethod
@@ -113,6 +117,12 @@ class FrameMeta(BaseModel):
     image: str
     mode: str
     scene_id: int | None = None
+    # Dataset v2 (additive; absent on v1 datasets)
+    category: str | None = None  # adaptive | opening_dense | key_event
+    extraction_reason: str | None = None
+    event_id: str | None = None
+    transcript_segment_index: int | None = None
+    phash: str | None = None
 
 
 class FrameListResponse(BaseModel):
@@ -145,6 +155,8 @@ class PerformanceData(BaseModel):
     share_count: int | None = None
     hashtags: list[str] = Field(default_factory=list)
     fields_from: dict[str, Literal["auto", "manual"]] = Field(default_factory=dict)
+    # Dataset v2 (additive): per-metric status explaining every null value
+    fields_status: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class Manifest(BaseModel):

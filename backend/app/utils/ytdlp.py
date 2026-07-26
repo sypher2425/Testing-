@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_settings
@@ -388,35 +388,134 @@ def download_video(url: str, dest_dir: Path, *, log: callable) -> Path:
     return matches[0]
 
 
-def extract_comments(url: str, *, limit: int, log: callable) -> list[dict]:
-    """Best-effort: never raises. Returns [] (and logs a warning) on any
-    failure — comment extraction is a bonus, not required for the job to
-    succeed, and is known to be fragile on TikTok/Instagram."""
+# Platforms whose yt-dlp extractor has no comment support at all — attempting
+# is pointless, so the status can say "unsupported" up front instead of
+# reporting a misleading empty success.
+_COMMENTS_UNSUPPORTED_PLATFORMS = {"tiktok"}
+
+_RATE_LIMIT_MARKERS = ["rate-limit", "rate limit", "too many requests", "429"]
+_AUTH_MARKERS = ["login required", "requires authentication", "sign in", "log in", "cookies", "account is private"]
+
+
+def _classify_comment_failure(stderr: str) -> tuple[str, str]:
+    """Returns (status, reason) for a failed comment-extraction attempt."""
+    from app.utils import status as st
+
+    lowered = stderr.lower()
+    if any(m in lowered for m in _RATE_LIMIT_MARKERS):
+        return st.RATE_LIMITED, "The platform rate-limited the request"
+    if any(m in lowered for m in _AUTH_MARKERS):
+        return st.AUTHENTICATION_REQUIRED, "The platform requires a logged-in session for comments"
+    return st.EXTRACTION_FAILED, "yt-dlp could not extract comments"
+
+
+def _normalize_comments(raw_comments: list[dict], limit: int) -> list[dict]:
+    """Top-level comments ranked by likes, enriched with the fields yt-dlp
+    actually provides (null when a platform doesn't expose one)."""
+    reply_counts: dict[str, int] = {}
+    for c in raw_comments:
+        parent = c.get("parent")
+        if parent and parent != "root":
+            reply_counts[str(parent)] = reply_counts.get(str(parent), 0) + 1
+
+    top_level = [c for c in raw_comments if c.get("parent") in (None, "root")]
+    top_level.sort(key=lambda c: c.get("like_count") or 0, reverse=True)
+
+    normalized = []
+    for c in top_level[:limit]:
+        comment_id = c.get("id")
+        normalized.append(
+            {
+                "id": comment_id,
+                "text": c.get("text"),
+                "author": c.get("author"),
+                "author_id": c.get("author_id"),
+                "like_count": c.get("like_count"),
+                "reply_count": reply_counts.get(str(comment_id)) if comment_id is not None else None,
+                "timestamp": c.get("timestamp"),
+                "is_pinned": c.get("is_pinned"),
+                "author_is_uploader": c.get("author_is_uploader"),
+            }
+        )
+    return normalized
+
+
+def extract_comments(
+    url: str,
+    *,
+    limit: int,
+    log: callable,
+    platform: str | None = None,
+    platform_comment_count: int | None = None,
+) -> dict:
+    """Best-effort comment extraction with an explicit outcome — never raises
+    and never hides *why* a result is empty. Returns
+    {status, reason, error, platform_comment_count, extracted_comment_count,
+     attempted_at, comments[]}."""
+    from app.utils import status as st
+
     settings = get_settings()
+    base = {
+        "platform_comment_count": platform_comment_count,
+        "extracted_comment_count": 0,
+        "attempted_at": datetime.now(timezone.utc).isoformat(),
+        "error": None,
+        "comments": [],
+    }
+
+    if platform in _COMMENTS_UNSUPPORTED_PLATFORMS:
+        log("warning", f"Comment extraction is unsupported for {platform} — recording status and moving on")
+        return {
+            **base,
+            "status": st.UNSUPPORTED,
+            "reason": f"yt-dlp has no comment extraction support for {platform}",
+        }
+
     try:
         proc = _run(
             ["--dump-single-json", "--skip-download", "--write-comments", "--no-warnings", url],
             timeout=settings.YTDLP_TIMEOUT_SECONDS,
         )
         if proc.returncode != 0:
-            log("warning", f"Comment extraction failed, continuing without comments: {_first_error_line(proc.stderr.decode(errors='replace'))}")
-            return []
+            stderr = proc.stderr.decode(errors="replace")
+            failure_status, reason = _classify_comment_failure(stderr)
+            log("warning", f"Comment extraction failed ({failure_status}): {_first_error_line(stderr)}")
+            return {**base, "status": failure_status, "reason": reason, "error": _first_error_line(stderr)}
         info = json.loads(proc.stdout.decode(errors="replace"))
-        comments = info.get("comments") or []
+        raw_comments = info.get("comments") or []
     except Exception as exc:  # noqa: BLE001 - best-effort by design
         log("warning", f"Comment extraction failed, continuing without comments: {exc}")
-        return []
+        return {**base, "status": st.EXTRACTION_FAILED, "reason": "Unexpected error during extraction", "error": str(exc)}
 
-    def _likes(c: dict) -> int:
-        return c.get("like_count") or 0
-
-    top = sorted(comments, key=_likes, reverse=True)[:limit]
-    return [
-        {
-            "author": c.get("author"),
-            "text": c.get("text"),
-            "like_count": c.get("like_count"),
-            "timestamp": c.get("timestamp"),
+    comments = _normalize_comments(raw_comments, limit)
+    if not comments:
+        if platform_comment_count and platform_comment_count > 0:
+            # The platform says comments exist but extraction returned none —
+            # that's a failure worth flagging, not an empty success.
+            log(
+                "warning",
+                f"Platform reports {platform_comment_count} comments but extraction returned none "
+                "(commonly authentication or rate limiting)",
+            )
+            return {
+                **base,
+                "status": st.EXTRACTION_FAILED,
+                "reason": "zero_results_unexpected",
+                "error": (
+                    f"The platform reports {platform_comment_count} comments but extraction "
+                    "returned none — commonly caused by authentication requirements or rate limiting"
+                ),
+            }
+        return {
+            **base,
+            "status": st.SUCCESS,
+            "reason": "no_comments_exist" if platform_comment_count == 0 else "no_comments_returned",
         }
-        for c in top
-    ]
+
+    return {
+        **base,
+        "status": st.SUCCESS,
+        "reason": None,
+        "extracted_comment_count": len(comments),
+        "comments": comments,
+    }

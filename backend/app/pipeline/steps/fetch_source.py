@@ -10,7 +10,9 @@ video into source/, and best-effort fetches comments. A failure to get the
 is nothing to process. A failure to get metadata/comments never does; it
 just falls back to manual fields (or nulls) and logs a warning.
 """
+import hashlib
 import json
+from pathlib import Path
 
 from app.config import get_settings
 from app.pipeline.base import PipelineStep
@@ -25,6 +27,14 @@ from app.utils.ytdlp import (
     extract_metadata,
     fetch_profile_reel_view_count,
 )
+
+
+def _sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class FetchSourceStep(PipelineStep):
@@ -120,18 +130,54 @@ class FetchSourceStep(PipelineStep):
             ctx.shared["original_filename"] = title
         ctx.update_job(update_fields)
 
+        source_hash = _sha256_of(downloaded_path)
+        ctx.shared["source_sha256"] = source_hash
+        ctx.update_job({"source_sha256": source_hash})
+
+        ctx.shared["music_info"] = {
+            "track": metadata.raw.get("track"),
+            "artist": metadata.raw.get("artist"),
+        }
+
         ctx.set_step_progress(self.name, 80)
         ctx.check_cancel()
 
-        comments = extract_comments(source_url, limit=settings.YTDLP_COMMENT_LIMIT, log=ctx.log)
+        extraction = extract_comments(
+            source_url,
+            limit=settings.YTDLP_COMMENT_LIMIT,
+            log=ctx.log,
+            platform=metadata.platform,
+            platform_comment_count=metadata.comment_count,
+        )
+        comments = extraction["comments"]
+
+        # v2 outputs: full comments + an explicit extraction outcome.
         ctx.storage.save_bytes(
-            ctx.job_relative("performance", "comments.json"),
+            ctx.job_relative("comments", "top_comments.json"),
             json.dumps(comments, indent=2).encode(),
         )
+        ctx.storage.save_bytes(
+            ctx.job_relative("comments", "extraction_status.json"),
+            json.dumps({k: v for k, v in extraction.items() if k != "comments"}, indent=2).encode(),
+        )
+        # Legacy v1 output kept for backward compatibility (same simple shape).
+        legacy_comments = [
+            {"author": c["author"], "text": c["text"], "like_count": c["like_count"], "timestamp": c["timestamp"]}
+            for c in comments
+        ]
+        ctx.storage.save_bytes(
+            ctx.job_relative("performance", "comments.json"),
+            json.dumps(legacy_comments, indent=2).encode(),
+        )
+        ctx.shared["comment_extraction"] = extraction
         if comments:
             ctx.info(f"Fetched {len(comments)} top comments")
         else:
-            ctx.warning("No comments were fetched (unsupported platform, extraction failure, or none exist)")
+            ctx.warning(
+                f"No comments extracted (status={extraction['status']}"
+                + (f", reason={extraction['reason']}" if extraction.get("reason") else "")
+                + ")"
+            )
 
         performance = self._merge(metadata, manual, comment_count_fallback=len(comments) or None)
 
@@ -148,6 +194,11 @@ class FetchSourceStep(PipelineStep):
             if fallback_views is not None:
                 performance["view_count"] = fallback_views
                 performance["fields_from"]["view_count"] = "auto"
+                performance["fields_status"]["view_count"] = {
+                    "status": "success",
+                    "source": "auto",
+                    "reason": "Backfilled from the account's Reels grid",
+                }
 
         ctx.shared["performance"] = performance
         ctx.update_job({"performance": performance})
@@ -161,8 +212,15 @@ class FetchSourceStep(PipelineStep):
             tail = exc.stderr.strip()[-1500:]
             ctx.error(f"yt-dlp stderr (last 1500 chars): {tail}")
 
-    @staticmethod
-    def _merge(metadata: VideoMetadata, manual: dict, *, comment_count_fallback: int | None) -> dict:
+    # Metrics a platform genuinely does not expose publicly — different from
+    # an extraction failure, and updating yt-dlp or adding cookies won't help.
+    _METRIC_NOT_AVAILABLE: dict = {
+        ("instagram", "share_count"): "Instagram has no public share-count metric",
+        ("youtube", "share_count"): "YouTube does not expose a share count",
+    }
+
+    @classmethod
+    def _merge(cls, metadata: VideoMetadata, manual: dict, *, comment_count_fallback: int | None) -> dict:
         fields_from: dict[str, str] = {}
 
         def pick(key: str, auto_value):
@@ -174,7 +232,7 @@ class FetchSourceStep(PipelineStep):
                 fields_from[key] = "auto"
             return auto_value
 
-        return {
+        merged = {
             "source_url": metadata.source_url,
             "platform": metadata.platform,
             "title": pick("title", metadata.title),
@@ -188,3 +246,29 @@ class FetchSourceStep(PipelineStep):
             "hashtags": manual.get("hashtags") or metadata.hashtags,
             "fields_from": fields_from,
         }
+
+        # v2 additive: explain every null metric instead of leaving it bare.
+        fields_status: dict[str, dict] = {}
+        for key in ("view_count", "like_count", "comment_count", "share_count"):
+            if merged[key] is not None:
+                fields_status[key] = {"status": "success", "source": fields_from.get(key, "auto")}
+            elif (metadata.platform, key) in cls._METRIC_NOT_AVAILABLE:
+                fields_status[key] = {
+                    "status": "not_available",
+                    "source": None,
+                    "reason": cls._METRIC_NOT_AVAILABLE[(metadata.platform, key)],
+                }
+            elif metadata.platform == "manual":
+                fields_status[key] = {
+                    "status": "manual_required",
+                    "source": None,
+                    "reason": "No source URL was provided; enter this value manually",
+                }
+            else:
+                fields_status[key] = {
+                    "status": "extraction_failed",
+                    "source": None,
+                    "reason": "The platform did not expose this field to the extractor",
+                }
+        merged["fields_status"] = fields_status
+        return merged

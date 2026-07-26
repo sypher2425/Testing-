@@ -95,7 +95,7 @@ for jobs whose heartbeat has gone stale (e.g. the worker crashed mid-job) and
 marks them `failed` with a clear reason — nothing is left "processing
 forever".
 
-### Output layout
+### Output layout (dataset schema v2)
 
 ```
 {job_id}/
@@ -103,19 +103,44 @@ forever".
   transcript/transcript.txt
   transcript/transcript.json
   transcript/subtitles.srt
-  frames/0000.000.jpg ...
-  metadata/frames.json
-  performance/comments.json   # only present for URL-ingested jobs
-  manifest.json
+  frames/0000.000.jpg ...           # adaptive frames (flat, unchanged from v1)
+  frames/opening_dense/...          # every 0.25s of the first 8s (configurable)
+  frames/key_events/...             # ±0.25s around each annotated event
+  metadata/frames.json              # all frames w/ category, event_id, phash, transcript link
+  analytics/performance.json        # engagement metrics + rates, each w/ status/source
+  content/caption.txt               # exact post caption (URL jobs)
+  content/audio.json                # word counts, overall vs narration WPM, silence gaps, music
+  comments/top_comments.json        # full comment objects (id/author/likes/replies/pinned)
+  comments/extraction_status.json   # WHY comments are (or aren't) there
+  performance/comments.json         # legacy v1 shape, kept for backward compat
+  events.json                       # manual-first timeline events (hook, twists, CTA...)
+  manifest.json                     # dataset_schema_version: "2.0"
   output.zip
 ```
 
 `manifest.json` is the entry point for AI consumption: job id, original
 filename, video properties, detected language, extraction mode + params,
-frame count, every file with a relative path + description, processing
-timestamps, app version, and a reserved `analyses` section for future
-per-frame/per-transcript analysis outputs (OCR, object detection, embeddings,
-etc.) — see [Extending the pipeline](#extending-the-pipeline).
+per-category frame counts, `source_video_sha256`, an `extraction_report`
+(status + timing per stage), a `posting_context` block, a machine-readable
+`analysis_summary` for cross-video comparison, every file with a relative
+path + description, and a reserved `analyses` section for future AI outputs
+(OCR, object detection, embeddings) — see
+[Extending the pipeline](#extending-the-pipeline).
+
+**The dataset never fabricates data.** Any metric that can't be extracted is
+stored as `null` with an explicit status and reason, using this vocabulary:
+`success · partial · not_available · unsupported · authentication_required ·
+rate_limited · extraction_failed · manual_required · skipped`. `not_available`
+means the platform genuinely doesn't have the metric (e.g. Instagram share
+counts); `extraction_failed` means it exists but couldn't be read;
+`manual_required` means only the creator's own analytics can supply it —
+those fields are filled via the enrichment flow (coming in the next round) or
+manual entry. A v1 dataset (no `dataset_schema_version`) is still fully
+readable; every v2 field is additive.
+
+Old datasets: v1 job folders and ZIPs remain valid — all v1 files keep their
+paths and shapes, and v2 files simply won't exist there. Consumers should
+treat a missing `dataset_schema_version` as `1.0`.
 
 ## API
 
@@ -200,6 +225,20 @@ tokens for whatever account you exported it from. Nothing requires it; leave
 `COOKIES_FILE` blank if you don't need it, and a missing/misconfigured file
 just falls back to anonymous requests rather than breaking every fetch.
 
+**Platform limitations (what auto-extraction can and cannot get):**
+
+| Metric | YouTube | TikTok | Instagram |
+|---|---|---|---|
+| Views / likes | ✅ | ✅ | likes ✅, views often withheld (`extraction_failed`) |
+| Share/repost count | ❌ `not_available` (no public metric) | ✅ (repost count) | ❌ `not_available` (no public metric) |
+| Comments (text) | ✅ reliable | ❌ `unsupported` by yt-dlp | fragile — often `authentication_required`/`rate_limited` |
+| Saves, profile visits, follows, retention | ❌ creator-only analytics on every platform → `manual_required` |  |  |
+
+`comments/extraction_status.json` records the exact outcome of every comment
+extraction attempt — including the previously-confusing case where the
+platform reports hundreds of comments but extraction returns zero
+(`reason: "zero_results_unexpected"`).
+
 ## Research mode (topic search → transcript bundle)
 
 The Home page's **Research (transcripts)** tab turns a YouTube topic search
@@ -253,7 +292,8 @@ See `.env.example` for the full annotated list. Highlights:
 | `MAX_FRAMES` | 2000 | Hard cap for `every_frame`; soft cap (with a warning) for other modes |
 | `ADAPTIVE_MIN_FRAMES` / `ADAPTIVE_MAX_FRAMES` | 30 / 150 | Bounds for adaptive mode's target frame count |
 | `RETENTION_HOURS` | 72 | Jobs + artifacts are deleted this many hours after completion by a periodic Celery task |
-| `YTDLP_COMMENT_LIMIT` | 100 | Top comments (by likes) saved per URL-ingested job |
+| `YTDLP_COMMENT_LIMIT` | 100 | Top comments (by likes) saved per URL-ingested job (`MAX_COMMENTS` accepted as an alias) |
+| `OPENING_DENSE_DURATION` / `OPENING_DENSE_INTERVAL` | 8 / 0.25 | Dense hook-analysis frames: one every INTERVAL seconds for the first DURATION seconds; per-job overridable, disable per job with `opening_dense_enabled=false` |
 | `COOKIES_FILE` | (unset) | In-container path to a cookies.txt for account-gated fetches — use `/run/secrets/cookies.txt` and drop the file at `secrets/cookies.txt` on the host; optional |
 | `STALE_JOB_TIMEOUT_MINUTES` | 30 | A job with no heartbeat update for this long is marked `failed` (worker crash recovery) |
 | `CORS_ORIGINS` | http://localhost:3000 | Comma-separated list |
