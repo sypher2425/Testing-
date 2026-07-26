@@ -162,8 +162,14 @@ class TranscribeStep(PipelineStep):
             except StepTimeout as exc:
                 raise PipelineFailedError("transcription_timeout", str(exc)) from exc
             except Exception as exc:  # noqa: BLE001
+                # Name the exception type: this handler catches anything raised
+                # inside the loop, not just Whisper's own errors, and a bare
+                # "faster-whisper failed" once sent us hunting in the wrong
+                # component for what was actually a database error.
                 raise PipelineFailedError(
-                    "transcription_failed", f"faster-whisper failed: {exc}", {"error": str(exc)}
+                    "transcription_failed",
+                    f"faster-whisper failed: {type(exc).__name__}: {exc}",
+                    {"error": str(exc), "error_type": type(exc).__name__},
                 ) from exc
 
             ctx.set_step_progress(self.name, 70)
