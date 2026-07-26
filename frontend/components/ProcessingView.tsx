@@ -70,6 +70,20 @@ export default function ProcessingView({ job }: { job: JobStatusResponse }) {
           <span>Overall progress: {job.overall_progress}%</span>
         </div>
 
+        {job.status === "queued" && (
+          <div className="mb-4 rounded-lg border border-slate-500/30 bg-slate-500/10 p-3 text-sm text-slate-300">
+            {job.queue_position && job.queue_position > 0 ? (
+              <>
+                Waiting in queue — {job.queue_position} job
+                {job.queue_position === 1 ? "" : "s"} ahead of this one. Jobs run one at a time so
+                transcription doesn&apos;t run out of memory; this will start automatically.
+              </>
+            ) : (
+              <>Queued — starting shortly.</>
+            )}
+          </div>
+        )}
+
         <div className="mb-5 h-2 overflow-hidden rounded-full bg-surface-border">
           <div
             className="h-full rounded-full bg-indigo-500 transition-all"

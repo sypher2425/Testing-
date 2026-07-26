@@ -21,7 +21,19 @@ class Settings(BaseSettings):
 
     # Celery / Redis
     REDIS_URL: str = "redis://redis:6379/0"
-    CELERY_CONCURRENCY: int = 2
+    # Transcription is the memory-heavy step: each concurrent worker child
+    # loads its own copy of the Whisper model (~0.5-1GB for `small`). Two at
+    # once on a memory-capped Docker Desktop can get OOM-killed, which looks
+    # exactly like a job stuck forever. Default 1; raise it deliberately on
+    # machines with headroom. CELERY_CONCURRENCY is kept as an alias so
+    # existing .env files keep working.
+    TRANSCRIPTION_CONCURRENCY: int = Field(
+        default=1, validation_alias=AliasChoices("TRANSCRIPTION_CONCURRENCY", "CELERY_CONCURRENCY")
+    )
+    # 0 disables child recycling entirely. A recycled child must reload the
+    # model from the on-disk cache (fast, no re-download), so a high value
+    # keeps the model warm across sequential jobs.
+    WORKER_MAX_TASKS_PER_CHILD: int = 100
 
     # Transcription
     WHISPER_MODEL_SIZE: str = "small"
@@ -29,6 +41,17 @@ class Settings(BaseSettings):
     WHISPER_COMPUTE_TYPE: str = "int8"
     ENABLE_DIARIZATION: bool = False
     HF_TOKEN: str = ""
+    # Where faster-whisper/huggingface_hub caches model weights. Mounted as a
+    # named Docker volume so a `docker compose up --build` never re-downloads
+    # the ~460MB `small` model.
+    HF_HOME: str = "/root/.cache/huggingface"
+    # Bounds a single download socket read inside huggingface_hub. Without
+    # this a stalled connection hangs indefinitely with no output.
+    HF_HUB_DOWNLOAD_TIMEOUT: int = 60
+    # Warm the model in a background thread when the worker boots, so a
+    # download problem shows up in the worker log immediately instead of
+    # mid-job, and the first real job doesn't pay the load cost.
+    WARM_MODEL_ON_STARTUP: bool = True
 
     # Frame extraction
     MAX_FRAMES: int = 2000
@@ -42,7 +65,21 @@ class Settings(BaseSettings):
     RETENTION_HOURS: int = 72
     STALE_JOB_TIMEOUT_MINUTES: int = 30
     FFMPEG_TIMEOUT_SECONDS: int = 3600
+    # Bounds the transcription loop itself (actually enforced as of R1.6).
     WHISPER_TIMEOUT_SECONDS: int = 3600
+    # Bounds model load + first-run download separately: a slow 460MB
+    # download is a different failure from a wedged transcription.
+    WHISPER_MODEL_LOAD_TIMEOUT_SECONDS: int = 1800
+    # How often to refresh last_heartbeat during a long blocking call.
+    HEARTBEAT_INTERVAL_SECONDS: int = 10
+    # Celery's own backstop: soft limit raises inside the task, hard limit
+    # kills the child. Sized above the per-step limits so the typed
+    # per-step errors win in normal operation.
+    TASK_SOFT_TIME_LIMIT_SECONDS: int = 7200
+    TASK_HARD_TIME_LIMIT_SECONDS: int = 7500
+    # What to do with jobs found mid-flight after a worker restart:
+    # "requeue" (re-run from the top if the source still exists) or "fail".
+    STARTUP_RECOVERY_MODE: str = "requeue"
 
     # URL ingestion (yt-dlp)
     # The installed version is pinned in requirements.txt for reproducible

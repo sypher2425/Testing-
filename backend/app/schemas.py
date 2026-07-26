@@ -70,6 +70,10 @@ class JobError(BaseModel):
 class JobStatusResponse(BaseModel):
     job_id: str
     job_type: str = "video"
+    # How many not-yet-finished jobs are ahead of this one. 0 = next up,
+    # None = not waiting (already running or finished). Lets the UI say
+    # "waiting behind 1 job" instead of showing a frozen progress bar.
+    queue_position: int | None = None
     original_filename: str
     status: str
     current_step: str

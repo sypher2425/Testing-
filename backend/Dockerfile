@@ -14,6 +14,18 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Optional: bake the Whisper weights into the image so the container never
+# needs to download them at runtime (useful for offline/air-gapped hosts).
+# Off by default — the `whisper_cache` volume in docker-compose.yml already
+# makes the download a one-time cost, and baking adds ~460MB to the image.
+#   docker compose build --build-arg PREFETCH_WHISPER_MODEL=true worker
+ARG PREFETCH_WHISPER_MODEL=false
+ARG WHISPER_MODEL_SIZE=small
+ENV HF_HOME=/root/.cache/huggingface
+RUN if [ "$PREFETCH_WHISPER_MODEL" = "true" ]; then \
+      python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL_SIZE}', device='cpu', compute_type='int8')" ; \
+    fi
+
 COPY . .
 
 RUN mkdir -p /data/jobs /data/db

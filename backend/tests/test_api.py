@@ -174,6 +174,51 @@ def test_create_research_job_succeeds_and_enqueues(client):
     assert body["options"]["research"]["sort_mode"] == "newest"
 
 
+def test_queue_position_counts_only_older_unfinished_jobs(client):
+    """With concurrency 1, a second submitted job must report that it's
+    waiting behind the first rather than looking frozen at 0%."""
+    from app.database import get_session
+    from app.models import Job
+
+    # Other tests in this module leave queued jobs behind; queue position is
+    # global by definition, so start from a clean table.
+    cleanup = get_session()
+    try:
+        cleanup.query(Job).delete()
+        cleanup.commit()
+    finally:
+        cleanup.close()
+
+    with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
+        "app.tasks.process_job.delay"
+    ):
+        first = client.post(
+            "/api/jobs",
+            files={"file": ("a.mp4", io.BytesIO(b"fake mp4 bytes" * 100), "video/mp4")},
+            data={"mode": "adaptive"},
+        ).json()["job_id"]
+        second = client.post(
+            "/api/jobs",
+            files={"file": ("b.mp4", io.BytesIO(b"other mp4 bytes" * 100), "video/mp4")},
+            data={"mode": "adaptive"},
+        ).json()["job_id"]
+
+    assert client.get(f"/api/jobs/{first}").json()["queue_position"] == 0
+    assert client.get(f"/api/jobs/{second}").json()["queue_position"] == 1
+
+    # Once the first job finishes it stops blocking the queue.
+    session = get_session()
+    try:
+        session.get(Job, first).status = "completed"
+        session.commit()
+    finally:
+        session.close()
+
+    assert client.get(f"/api/jobs/{second}").json()["queue_position"] == 0
+    # A finished job isn't "waiting" at all.
+    assert client.get(f"/api/jobs/{first}").json()["queue_position"] is None
+
+
 def test_create_research_job_rejects_bad_params(client):
     resp = client.post("/api/jobs/research", json={"query": "", "result_count": 10})
     assert resp.status_code == 422

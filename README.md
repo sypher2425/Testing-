@@ -79,8 +79,8 @@ uses plain SQLAlchemy types (no SQLite-specific features) so swapping
 ## How a job flows
 
 ```
-queued → fetching_source → probing → transcribing → extracting_frames → generating_metadata → zipping → completed
-                                                                                              ↘ failed / cancelled (from any state)
+queued → fetching_source → probing → loading_model → transcribing → extracting_frames → generating_metadata → zipping → completed
+                                                                                                             ↘ failed / cancelled (from any state)
 ```
 
 `fetching_source` is a fast no-op for a plain file upload (the file's already on
@@ -94,6 +94,48 @@ Events (`GET /api/jobs/{id}/events`) with a polling fallback
 for jobs whose heartbeat has gone stale (e.g. the worker crashed mid-job) and
 marks them `failed` with a clear reason — nothing is left "processing
 forever".
+
+### Transcription reliability
+
+Transcription is the slowest and most memory-hungry step, so it has dedicated
+safeguards:
+
+- **`loading_model` is its own step.** The first run downloads ~460MB of
+  Whisper weights (`small`). Folding that into "Transcribing audio" made a
+  multi-minute download indistinguishable from a hang; now it has its own
+  status, progress bar, and log lines.
+- **The model cache is a named Docker volume** (`whisper_cache` →
+  `/root/.cache/huggingface`). It survives `up --build` and `down`, so the
+  download is a one-time cost — only `down -v` forces a re-download. Set
+  `PREFETCH_WHISPER_MODEL=true` as a build arg to bake the weights into the
+  image instead (offline-safe, ~460MB larger image).
+- **The model is loaded once per worker and reused** across sequential jobs;
+  the job log says explicitly whether it was loaded or reused.
+- **Three layers of timeout**: `WHISPER_MODEL_LOAD_TIMEOUT_SECONDS` and
+  `WHISPER_TIMEOUT_SECONDS` bound the two phases with typed failures,
+  `HF_HUB_DOWNLOAD_TIMEOUT` bounds a stalled download socket, and Celery's
+  `TASK_HARD_TIME_LIMIT_SECONDS` kills the child as a last resort. Nothing
+  can hang indefinitely.
+- **Progress advances per transcript segment** and a background heartbeat
+  refreshes `last_heartbeat` during blocking calls, so the reaper can tell
+  "slow" from "dead" and never fails a job that's actually working.
+- **`TRANSCRIPTION_CONCURRENCY` defaults to 1.** Each concurrent transcription
+  holds its own model copy; two at once on a memory-capped Docker Desktop can
+  be OOM-killed, which strands a job in `transcribing`. Jobs queue instead,
+  and the Processing view shows **"Waiting in queue — N jobs ahead"** so a
+  waiting job never looks frozen. Raise the value if you have RAM headroom.
+- **Abnormal worker deaths are explained, not silent.** A child killed by the
+  OOM killer fails its job with `worker_out_of_memory` and a message naming
+  the knobs to turn, instead of leaving the row untouched.
+- **Interrupted jobs recover at startup.** On worker boot, jobs left in a
+  running state are requeued (if the source is still on disk) or marked
+  `failed` with `error_code: "interrupted"` — controlled by
+  `STARTUP_RECOVERY_MODE`.
+
+*Future optimization (not implemented):* a shared-model multithreaded worker
+that serves one model instance to N threads would allow real parallelism
+without N× memory. Deferred deliberately — the per-process model with
+concurrency 1 is the stable configuration.
 
 ### Output layout (dataset schema v2)
 

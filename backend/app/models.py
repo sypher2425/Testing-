@@ -12,6 +12,7 @@ PIPELINE_STEPS = [
     "queued",
     "fetching_source",
     "probing",
+    "loading_model",
     "transcribing",
     "extracting_frames",
     "generating_metadata",
@@ -84,10 +85,11 @@ class Job(Base):
 
     logs: Mapped[list["JobLog"]] = relationship(back_populates="job", cascade="all, delete-orphan")
 
-    def to_dict(self) -> dict:
+    def to_dict(self, queue_position: int | None = None) -> dict:
         return {
             "job_id": self.id,
             "job_type": self.job_type or "video",
+            "queue_position": queue_position,
             "original_filename": self.original_filename,
             "status": self.status,
             "current_step": self.current_step,

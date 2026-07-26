@@ -1,4 +1,9 @@
-"""Transcription step: local faster-whisper, optional WhisperX diarization."""
+"""Transcription step: local faster-whisper, optional WhisperX diarization.
+
+The model itself is loaded by LoadWhisperModelStep (which runs immediately
+before this step) so the download and the transcription are separately
+visible, separately timed out, and separately reported in the UI.
+"""
 import json
 import tempfile
 from pathlib import Path
@@ -8,22 +13,20 @@ from app.pipeline.base import PipelineStep
 from app.pipeline.context import PipelineContext
 from app.pipeline.errors import PipelineFailedError
 from app.utils.ffmpeg import FFmpegError, extract_audio_wav
+from app.utils.timeouts import HeartbeatTicker, StepTimeout, time_limit
 
-_model_cache: dict[str, object] = {}
+# Progress band this step reports within: audio extraction takes it to
+# TRANSCRIBE_PROGRESS_START, then per-segment progress fills the rest.
+TRANSCRIBE_PROGRESS_START = 20
+TRANSCRIBE_PROGRESS_END = 70
 
 
-def _get_whisper_model():
-    settings = get_settings()
-    key = f"{settings.WHISPER_MODEL_SIZE}:{settings.WHISPER_DEVICE}:{settings.WHISPER_COMPUTE_TYPE}"
-    if key not in _model_cache:
-        from faster_whisper import WhisperModel
+def _get_whisper_model(log=None):
+    """Delegates to the shared loader so the model is loaded once per worker
+    process and reused across sequential jobs."""
+    from app.pipeline.steps.load_model import load_whisper_model
 
-        _model_cache[key] = WhisperModel(
-            settings.WHISPER_MODEL_SIZE,
-            device=settings.WHISPER_DEVICE,
-            compute_type=settings.WHISPER_COMPUTE_TYPE,
-        )
-    return _model_cache[key]
+    return load_whisper_model(log=log)
 
 
 def _format_srt_timestamp(seconds: float) -> str:
@@ -115,23 +118,49 @@ class TranscribeStep(PipelineStep):
                     "audio_extraction_failed", exc.message, exc.to_detail()
                 ) from exc
 
-            ctx.set_step_progress(self.name, 20)
+            ctx.set_step_progress(self.name, TRANSCRIBE_PROGRESS_START)
+            duration = video_meta.get("duration_seconds") or 0.0
             try:
-                model = _get_whisper_model()
-                segments_iter, info = model.transcribe(
-                    audio_path, word_timestamps=True, vad_filter=True
-                )
-                segments: list[dict] = []
-                for seg in segments_iter:
-                    ctx.check_cancel()
-                    segments.append(
-                        {
-                            "start": round(seg.start, 3),
-                            "end": round(seg.end, 3),
-                            "text": seg.text.strip(),
-                        }
-                    )
-                language = info.language
+                # The model is normally already warm from LoadWhisperModelStep;
+                # this is a cache hit unless that step was skipped.
+                model = ctx.shared.get("whisper_model") or _get_whisper_model(log=ctx.log)
+
+                # Two guards around the same blocking work:
+                #  - HeartbeatTicker proves liveness to the stale-job reaper
+                #  - time_limit bounds the whole loop so it can never hang forever
+                with HeartbeatTicker(settings.HEARTBEAT_INTERVAL_SECONDS, ctx.heartbeat):
+                    with time_limit(
+                        settings.WHISPER_TIMEOUT_SECONDS,
+                        f"Transcription exceeded WHISPER_TIMEOUT_SECONDS "
+                        f"({settings.WHISPER_TIMEOUT_SECONDS}s) and was aborted.",
+                    ):
+                        segments_iter, info = model.transcribe(
+                            audio_path, word_timestamps=True, vad_filter=True
+                        )
+                        segments: list[dict] = []
+                        # faster-whisper yields lazily: the real work happens as
+                        # we iterate, so this is where progress actually moves.
+                        for seg in segments_iter:
+                            ctx.check_cancel()
+                            segments.append(
+                                {
+                                    "start": round(seg.start, 3),
+                                    "end": round(seg.end, 3),
+                                    "text": seg.text.strip(),
+                                }
+                            )
+                            if duration > 0:
+                                fraction = min(max(seg.end / duration, 0.0), 1.0)
+                                ctx.set_step_progress(
+                                    self.name,
+                                    TRANSCRIBE_PROGRESS_START
+                                    + round((TRANSCRIBE_PROGRESS_END - TRANSCRIBE_PROGRESS_START) * fraction),
+                                )
+                            else:
+                                ctx.heartbeat()
+                        language = info.language
+            except StepTimeout as exc:
+                raise PipelineFailedError("transcription_timeout", str(exc)) from exc
             except Exception as exc:  # noqa: BLE001
                 raise PipelineFailedError(
                     "transcription_failed", f"faster-whisper failed: {exc}", {"error": str(exc)}

@@ -56,8 +56,23 @@ def _content_type_for(filename: str) -> str:
     return _CONTENT_TYPES.get(ext, "application/octet-stream")
 
 
-def _to_status_response(job: Job) -> JobStatusResponse:
-    return JobStatusResponse.model_validate(job.to_dict())
+def _queue_position(db: Session, job: Job) -> int | None:
+    """Number of unfinished jobs created before this one. Only meaningful
+    while the job is still waiting — a running or finished job returns None.
+    With TRANSCRIPTION_CONCURRENCY=1 this is literally 'how many ahead of me'."""
+    if job.status != "queued":
+        return None
+    return (
+        db.query(func.count(Job.id))
+        .filter(~Job.status.in_(TERMINAL_STATES), Job.created_at < job.created_at)
+        .scalar()
+        or 0
+    )
+
+
+def _to_status_response(job: Job, db: Session | None = None) -> JobStatusResponse:
+    position = _queue_position(db, job) if db is not None else None
+    return JobStatusResponse.model_validate(job.to_dict(queue_position=position))
 
 
 _BLOCKED_HOSTNAME_PREFIXES = ("127.", "10.", "192.168.", "169.254.")
@@ -341,7 +356,7 @@ def list_jobs(
         .all()
     )
     return JobListResponse(
-        jobs=[_to_status_response(j) for j in jobs], total=total, page=page, page_size=page_size
+        jobs=[_to_status_response(j, db) for j in jobs], total=total, page=page, page_size=page_size
     )
 
 
@@ -355,7 +370,7 @@ def _get_job_or_404(db: Session, job_id: str) -> Job:
 @router.get("/{job_id}", response_model=JobStatusResponse)
 def get_job(job_id: str, db: Session = Depends(db_session)) -> JobStatusResponse:
     job = _get_job_or_404(db, job_id)
-    return _to_status_response(job)
+    return _to_status_response(job, db)
 
 
 @router.get("/{job_id}/events")
@@ -370,7 +385,7 @@ async def job_events(job_id: str, db: Session = Depends(db_session)) -> Streamin
             if job is None:
                 yield "event: error\ndata: {\"message\": \"job not found\"}\n\n"
                 return
-            payload = json.dumps(_to_status_response(job).model_dump(mode="json"))
+            payload = json.dumps(_to_status_response(job, db).model_dump(mode="json"))
             if payload != last_payload:
                 yield f"data: {payload}\n\n"
                 last_payload = payload

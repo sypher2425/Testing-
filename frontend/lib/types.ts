@@ -39,6 +39,7 @@ export type JobStatusValue =
   | "queued"
   | "fetching_source"
   | "probing"
+  | "loading_model"
   | "transcribing"
   | "extracting_frames"
   | "generating_metadata"
@@ -54,6 +55,8 @@ export type JobType = "video" | "research";
 export interface JobStatusResponse {
   job_id: string;
   job_type: JobType;
+  /** Unfinished jobs ahead of this one while it waits; null once it's running. */
+  queue_position: number | null;
   original_filename: string;
   status: JobStatusValue;
   current_step: string;
@@ -237,6 +240,7 @@ export const TERMINAL_STATES: JobStatusValue[] = ["completed", "failed", "cancel
 export const PIPELINE_STEP_ORDER: { key: string; label: string }[] = [
   { key: "fetching_source", label: "Fetching source video" },
   { key: "probing", label: "Probing video" },
+  { key: "loading_model", label: "Loading transcription model" },
   { key: "transcribing", label: "Transcribing audio" },
   { key: "extracting_frames", label: "Extracting frames" },
   { key: "generating_metadata", label: "Generating metadata" },

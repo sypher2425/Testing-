@@ -40,12 +40,14 @@ def _build_pipeline(job_type: str = "video") -> list:
     from app.pipeline.steps.extract_frames import ExtractFramesStep
     from app.pipeline.steps.fetch_source import FetchSourceStep
     from app.pipeline.steps.generate_metadata import GenerateMetadataStep
+    from app.pipeline.steps.load_model import LoadWhisperModelStep
     from app.pipeline.steps.probe import ProbeStep
     from app.pipeline.steps.transcribe import TranscribeStep
 
     return [
         FetchSourceStep(),
         ProbeStep(),
+        LoadWhisperModelStep(),
         TranscribeStep(),
         ExtractFramesStep(),
         GenerateMetadataStep(),
@@ -72,6 +74,15 @@ def run_pipeline(job_id: str) -> None:
         job.step_progress = progress
         job.current_step = step_name
         job.overall_progress = _overall_progress(progress, job.job_type)
+        job.last_heartbeat = datetime.now(timezone.utc)
+        db.commit()
+
+    def heartbeat() -> None:
+        """Refresh last_heartbeat only. Called from a background ticker during
+        long blocking calls so the reaper can tell 'slow' from 'dead'."""
+        job = db.get(Job, job_id)
+        if job is None:
+            return
         job.last_heartbeat = datetime.now(timezone.utc)
         db.commit()
 
@@ -108,6 +119,7 @@ def run_pipeline(job_id: str) -> None:
         set_step_progress=set_step_progress,
         should_cancel=should_cancel,
         update_job=update_job,
+        heartbeat=heartbeat,
     )
     ctx.shared["job_type"] = job_type
     ctx.shared["mode"] = job.mode

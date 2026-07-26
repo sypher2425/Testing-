@@ -19,6 +19,10 @@ class PipelineContext:
     set_step_progress: Callable[[str, int], None]  # (step_name, 0-100) -> None
     should_cancel: Callable[[], bool]
     update_job: Callable[[dict[str, Any]], None]  # persist scalar fields onto the Job row
+    # Refreshes last_heartbeat without touching progress — for long blocking
+    # calls (model download, transcription) that would otherwise look dead to
+    # the stale-job reaper.
+    heartbeat: Callable[[], None] = lambda: None
     # Shared scratch space that later steps read from earlier steps.
     # e.g. shared["video"] = {"duration": .., "width": .., "has_audio": ..}
     shared: dict[str, Any] = field(default_factory=dict)
