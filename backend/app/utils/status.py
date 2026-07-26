@@ -7,6 +7,7 @@ reserved values) so wiring those features later is purely additive.
 """
 
 SUCCESS = "success"
+CALCULATED = "calculated"
 PARTIAL = "partial"
 NOT_AVAILABLE = "not_available"
 UNSUPPORTED = "unsupported"
@@ -14,10 +15,16 @@ AUTHENTICATION_REQUIRED = "authentication_required"
 RATE_LIMITED = "rate_limited"
 EXTRACTION_FAILED = "extraction_failed"
 MANUAL_REQUIRED = "manual_required"
+MANUAL_UNAVAILABLE = "manual_unavailable"
+NO_COMMENTS = "no_comments"
+COMMENTS_DISABLED = "comments_disabled"
+UNEXPECTED_EMPTY_RESULT = "unexpected_empty_result"
 SKIPPED = "skipped"
+UNKNOWN = "unknown"
 
 ALL_STATUSES = {
     SUCCESS,
+    CALCULATED,
     PARTIAL,
     NOT_AVAILABLE,
     UNSUPPORTED,
@@ -25,7 +32,12 @@ ALL_STATUSES = {
     RATE_LIMITED,
     EXTRACTION_FAILED,
     MANUAL_REQUIRED,
+    MANUAL_UNAVAILABLE,
+    NO_COMMENTS,
+    COMMENTS_DISABLED,
+    UNEXPECTED_EMPTY_RESULT,
     SKIPPED,
+    UNKNOWN,
 }
 
 # Where a value came from. "ai_estimated" / "screenshot_estimated" are

@@ -129,18 +129,69 @@ path + description, and a reserved `analyses` section for future AI outputs
 
 **The dataset never fabricates data.** Any metric that can't be extracted is
 stored as `null` with an explicit status and reason, using this vocabulary:
-`success · partial · not_available · unsupported · authentication_required ·
-rate_limited · extraction_failed · manual_required · skipped`. `not_available`
-means the platform genuinely doesn't have the metric (e.g. Instagram share
-counts); `extraction_failed` means it exists but couldn't be read;
+`success · calculated · partial · not_available · unsupported ·
+authentication_required · rate_limited · extraction_failed ·
+unexpected_empty_result · manual_required · manual_unavailable ·
+no_comments · comments_disabled · skipped · unknown`. `not_available` means
+the platform genuinely doesn't have the metric (e.g. Instagram share counts);
+`extraction_failed` means it exists but couldn't be read;
+`unexpected_empty_result` means the platform reports N>0 but extraction
+returned 0 (auth/rate-limit); `unsupported` means the current yt-dlp
+extractor doesn't do that job (TikTok comment text); `no_comments` /
+`comments_disabled` distinguish real emptiness from a fetch failure;
+`calculated` marks values derived from other extracted values (rates);
 `manual_required` means only the creator's own analytics can supply it —
 those fields are filled via the enrichment flow (coming in the next round) or
-manual entry. A v1 dataset (no `dataset_schema_version`) is still fully
-readable; every v2 field is additive.
+manual entry. Every metric also carries a `precision` field (`exact`,
+`rounded`, `estimated`, `screenshot_estimated`, `unknown`) so downstream
+consumers can weigh comparisons correctly; yt-dlp values default to `exact`.
+A v1 dataset (no `dataset_schema_version`) is still fully readable; every
+v2 field is additive.
 
 Old datasets: v1 job folders and ZIPs remain valid — all v1 files keep their
 paths and shapes, and v2 files simply won't exist there. Consumers should
 treat a missing `dataset_schema_version` as `1.0`.
+
+### Schema v2.1 additions (round 1.5)
+
+- `identity`: `{dataset_id, platform, platform_post_id, canonical_url,
+  source_url_original, source_video_sha256, exported_at}`. Canonical URLs
+  strip tracking params (`?is_from_webapp=1`, `?igsh=…`, `?si=…`) but keep
+  the identifying path bits; `platform_post_id` is the extracted native
+  ID (TikTok video id, Instagram shortcode, YouTube video id).
+- `performance_snapshot`: `{fetched_at, metric_window, source, platform}`.
+  Records **when** the metrics were retrieved so a dataset regenerated
+  next week is distinguishable from an earlier capture of the same video.
+- `platform_capabilities`: per-platform record of what the *current
+  extractor* can retrieve (e.g. `tiktok.public_comment_text: false`,
+  `instagram.public_views: false`). Describes our extractor, not the
+  platform itself.
+- Frame `mode` and `category` enums are now enforced. Adaptive frames use
+  `mode: "adaptive"`, dense-opening frames use `mode: "dense_interval"`,
+  key-event frames use `mode: "key_event"` — the R1 contradiction where
+  dense frames had `mode: "adaptive"` is fixed. Valid combinations live
+  in `app/utils/frame_schema.py`.
+- Audio fields renamed for precision: `voiceover_span_seconds` (first
+  spoken word → last spoken word), `active_narration_seconds` (sum of
+  segment spans), `silence_or_render_wait_seconds` (span − narration),
+  `overall_video_wpm`, `active_narration_wpm`. Old names
+  (`voiceover_duration_seconds`, `overall_wpm`) preserved as deprecated
+  aliases with a `_deprecated` note pointing to the new names.
+- `extraction_params.opening_dense` and `.key_events` record the
+  **effective** values used, with a `source` label
+  (`default_configuration` / `user_interface`). No more `null` for a
+  value the pipeline actually used.
+- `total_frame_count` + `frame_count_legacy_meaning: "adaptive_frames_only"`
+  disambiguate the `frame_count` legacy field.
+- Every metric carries a `precision` field. yt-dlp values default to
+  `exact`; rates get `precision: "derived_from_<worst-input>"` (no fake
+  six-decimal precision when an input is only known as a rounded number).
+- Every rate also carries `numerator_field` + `denominator_field`
+  references and `status: "calculated"`.
+- `metadata/validation_report.json` records the pre-export validator's
+  status (`success` / `warning` / `error`), warnings list, errors list,
+  and `validated_at`. Structural errors fail the job; warnings ship with
+  the dataset so downstream consumers can see them.
 
 ## API
 

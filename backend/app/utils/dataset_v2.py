@@ -5,9 +5,9 @@ All builders follow the same rules: never fabricate a value, never coerce a
 missing value to 0, and label every value with a status + source
 (see app.utils.status).
 """
-from app.utils import status as st
+from app.utils import precision, status as st
 
-DATASET_SCHEMA_VERSION = "2.0"
+DATASET_SCHEMA_VERSION = "2.1"
 
 # Engagement metrics beyond what platforms expose publicly — these can only
 # come from the creator's own analytics (manual entry / future enrichment).
@@ -65,7 +65,14 @@ def build_engagement_breakdown(performance: dict | None) -> dict:
         value = performance.get(perf_key)
         meta = fields_status.get(perf_key) or {}
         if value is not None:
-            return st.field_result(value, st.SUCCESS, source=meta.get("source") or st.SOURCE_AUTO)
+            result = st.field_result(value, st.SUCCESS, source=meta.get("source") or st.SOURCE_AUTO)
+            # R1.5: precision provenance. yt-dlp values are treated as exact
+            # (that's what the extractor claims); manual entries carry
+            # whatever their own status_record specifies. No auto-guessing.
+            result["precision"] = meta.get("precision", precision.EXACT)
+            if "display_value" in meta:
+                result["display_value"] = meta["display_value"]
+            return result
         return st.field_result(
             None,
             meta.get("status", st.NOT_AVAILABLE),
@@ -95,17 +102,40 @@ def build_engagement_breakdown(performance: dict | None) -> dict:
         "follow_conversion_rate": metrics["new_followers"],
     }
     views_value = metrics["views"]["value"]
+    views_precision = metrics["views"].get("precision", precision.UNKNOWN)
+    rate_field_map = {
+        "like_rate": "likes",
+        "comment_rate": "comments",
+        "share_rate": "shares",
+        "save_rate": "saves",
+        "repost_rate": "reposts",
+        "follow_conversion_rate": "new_followers",
+    }
     rates: dict = {}
     for rate_name, numerator in rate_numerator_sources.items():
         num_value = numerator["value"]
+        numerator_field = rate_field_map[rate_name]
         if isinstance(num_value, (int, float)) and isinstance(views_value, (int, float)) and views_value > 0:
-            rates[rate_name] = st.field_result(round(num_value / views_value, 6), st.SUCCESS, source=st.SOURCE_AUTO)
+            num_precision = numerator.get("precision", precision.UNKNOWN)
+            derived = precision.derived_label(num_precision, views_precision)
+            # If any input is imprecise, don't fake six decimals of precision.
+            decimals = 6 if derived == precision.EXACT else 4
+            rates[rate_name] = {
+                "value": round(num_value / views_value, decimals),
+                "status": st.CALCULATED,
+                "precision": derived,
+                "numerator_field": numerator_field,
+                "denominator_field": "views",
+            }
         else:
-            rates[rate_name] = st.field_result(
-                None,
-                st.NOT_AVAILABLE,
-                reason="Requires both a valid numerator and a valid view count",
-            )
+            rates[rate_name] = {
+                "value": None,
+                "status": st.NOT_AVAILABLE,
+                "precision": precision.UNKNOWN,
+                "numerator_field": numerator_field,
+                "denominator_field": "views",
+                "reason": "Requires both a valid numerator and a valid view count",
+            }
 
     return {"metrics": metrics, "rates": rates}
 

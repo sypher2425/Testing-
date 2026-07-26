@@ -21,6 +21,8 @@ from app.utils.dataset_v2 import (
     build_posting_context,
     normalize_events,
 )
+from app.utils.platform_capabilities import capabilities_for
+from app.utils.validation import validate_dataset
 
 
 class GenerateMetadataStep(PipelineStep):
@@ -214,6 +216,70 @@ class GenerateMetadataStep(PipelineStep):
 
         ctx.set_step_progress(self.name, 75)
 
+        # R1.5: record EFFECTIVE extraction params (not the raw request),
+        # with a source label. Keep the flat keys for v1 readers. Fallback
+        # values come from the same env settings ExtractFramesStep would
+        # have used, never the raw (possibly-null) user options.
+        dense_config = ctx.shared.get("opening_dense_config")
+        if dense_config is None:
+            user_duration = ctx.options.get("opening_dense_duration")
+            user_interval = ctx.options.get("opening_dense_interval")
+            enabled = bool(ctx.options.get("opening_dense_enabled", True))
+            dense_config = {
+                "enabled": enabled,
+                "duration_seconds": (user_duration if user_duration is not None else settings.OPENING_DENSE_DURATION) if enabled else None,
+                "interval_seconds": (user_interval if user_interval is not None else settings.OPENING_DENSE_INTERVAL) if enabled else None,
+                "source": "user_interface" if (user_duration is not None or user_interval is not None) else "default_configuration",
+            }
+        key_events_config = ctx.shared.get("key_events_config") or {
+            "enabled": bool(events),
+            "offsets_seconds": [-0.25, 0.0, 0.25],
+            "event_count": len(events),
+        }
+        extraction_params: dict = {
+            k: ctx.options.get(k)
+            for k in ("interval_ms", "target_frames", "frame_format", "frame_max_dim",
+                      "opening_dense_enabled", "opening_dense_duration", "opening_dense_interval")
+            if k in ctx.options
+        }
+        extraction_params["mode"] = mode
+        extraction_params["opening_dense"] = dense_config
+        extraction_params["key_events"] = key_events_config
+
+        # R1.5: performance snapshot metadata + identity block.
+        url_canonical = ctx.shared.get("url_canonical") or {}
+        canonical_url = url_canonical.get("canonical")
+        platform_post_id = url_canonical.get("platform_post_id")
+        resolved_platform = (performance or {}).get("platform") or url_canonical.get("platform") or "unknown"
+        performance_snapshot = None
+        if performance and performance.get("source_url"):
+            performance_snapshot = {
+                "fetched_at": ctx.shared.get("performance_fetched_at"),
+                "metric_window": "lifetime_at_capture",
+                "source": "yt_dlp",
+                "platform": resolved_platform,
+            }
+        elif performance:
+            performance_snapshot = {
+                "fetched_at": None,
+                "metric_window": "unknown",
+                "source": "manual",
+                "platform": resolved_platform,
+            }
+
+        manifest_generated_at = datetime.now(timezone.utc).isoformat()
+        identity_block = {
+            "dataset_id": ctx.job_id,
+            "platform": resolved_platform,
+            "platform_post_id": platform_post_id,
+            "canonical_url": canonical_url,
+            "source_url_original": ctx.shared.get("source_url"),
+            "source_video_sha256": ctx.shared.get("source_sha256"),
+            "exported_at": manifest_generated_at,
+        }
+
+        total_frame_count = sum(frame_counts.values())
+
         manifest = {
             "dataset_schema_version": DATASET_SCHEMA_VERSION,
             "job_id": ctx.job_id,
@@ -224,30 +290,22 @@ class GenerateMetadataStep(PipelineStep):
             "language": transcript.get("language"),
             "transcript_available": not transcript.get("skipped", False),
             "extraction_mode": mode,
-            "extraction_params": {
-                k: v
-                for k, v in ctx.options.items()
-                if k
-                in (
-                    "interval_ms",
-                    "target_frames",
-                    "frame_format",
-                    "frame_max_dim",
-                    "opening_dense_enabled",
-                    "opening_dense_duration",
-                    "opening_dense_interval",
-                )
-            },
+            "extraction_params": extraction_params,
             "frame_count": adaptive_count,
+            "frame_count_legacy_meaning": "adaptive_frames_only",
+            "total_frame_count": total_frame_count,
             "frame_counts": frame_counts,
             "files": files,
             "processing": {
                 "started_at": ctx.shared.get("started_at"),
-                "manifest_generated_at": datetime.now(timezone.utc).isoformat(),
+                "manifest_generated_at": manifest_generated_at,
                 "last_rebuilt_at": None,
             },
             "extraction_report": ctx.shared.get("stage_reports") or [],
+            "identity": identity_block,
             "performance": performance,
+            "performance_snapshot": performance_snapshot,
+            "platform_capabilities": capabilities_for(resolved_platform),
             "posting_context": build_posting_context(performance, ctx.shared.get("source_url")),
             "content": content_status,
             "comments": {
@@ -258,9 +316,38 @@ class GenerateMetadataStep(PipelineStep):
             "analyses": {},
         }
 
+        # R1.5: run the validator BEFORE writing the manifest, so the
+        # manifest can carry a summary of its own validation status. Frames
+        # are injected via a private key that's stripped before serialization.
+        manifest["_frames_for_validation"] = frames
+        job_dir_path = ctx.storage.get(ctx.job_relative(""))
+        report = validate_dataset(job_dir_path, manifest)
+        del manifest["_frames_for_validation"]
+
+        report_bytes = json.dumps(report.to_dict(), indent=2).encode()
+        ctx.storage.save_bytes(ctx.job_relative("metadata", "validation_report.json"), report_bytes)
+        files.append(
+            {
+                "path": "metadata/validation_report.json",
+                "description": "Pre-export validation status, warnings, and errors",
+                "size_bytes": len(report_bytes),
+            }
+        )
+        manifest["validation"] = {
+            "status": report.status,
+            "warnings_count": len(report.warnings),
+            "errors_count": len(report.errors),
+            "validated_at": report.validated_at,
+        }
+        for warning in report.warnings:
+            ctx.warning(f"[validation] {warning['code']}: {warning['message']}")
+        if report.errors:
+            for err in report.errors:
+                ctx.error(f"[validation] {err['code']}: {err['message']}")
+
         ctx.set_step_progress(self.name, 90)
         manifest_bytes = json.dumps(manifest, indent=2).encode()
         ctx.storage.save_bytes(ctx.job_relative("manifest.json"), manifest_bytes)
         ctx.shared["manifest"] = manifest
-        ctx.info("manifest.json written (dataset schema v2)")
+        ctx.info(f"manifest.json written (dataset schema v2.1, validation={report.status})")
         ctx.set_step_progress(self.name, 100)

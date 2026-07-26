@@ -489,9 +489,34 @@ def extract_comments(
 
     comments = _normalize_comments(raw_comments, limit)
     if not comments:
+        # R1.5 status classification:
+        # - platform reports 0 and we got 0        -> no_comments (clean success)
+        # - platform reports N>0 but we got 0:
+        #     * on a platform where the current extractor has no
+        #       public_comment_text capability (e.g. TikTok), this is
+        #       "unsupported" — not a failure to fetch, but the wrong tool
+        #       for the job.
+        #     * everywhere else it's unexpected_empty_result (commonly
+        #       auth/rate-limit).
+        if platform_comment_count == 0:
+            return {**base, "status": st.NO_COMMENTS, "reason": "The platform reports zero comments"}
         if platform_comment_count and platform_comment_count > 0:
-            # The platform says comments exist but extraction returned none —
-            # that's a failure worth flagging, not an empty success.
+            from app.utils.platform_capabilities import capabilities_for
+
+            caps = capabilities_for(platform)
+            if caps.get("public_comment_text") is False:
+                log(
+                    "warning",
+                    f"Platform reports {platform_comment_count} comments but the current yt-dlp "
+                    f"extractor for {platform} does not support comment text",
+                )
+                return {
+                    **base,
+                    "status": st.UNSUPPORTED,
+                    "reason": (
+                        f"Comment text is not supported by the current yt-dlp extractor for {platform}"
+                    ),
+                }
             log(
                 "warning",
                 f"Platform reports {platform_comment_count} comments but extraction returned none "
@@ -499,18 +524,14 @@ def extract_comments(
             )
             return {
                 **base,
-                "status": st.EXTRACTION_FAILED,
+                "status": st.UNEXPECTED_EMPTY_RESULT,
                 "reason": "zero_results_unexpected",
                 "error": (
                     f"The platform reports {platform_comment_count} comments but extraction "
                     "returned none — commonly caused by authentication requirements or rate limiting"
                 ),
             }
-        return {
-            **base,
-            "status": st.SUCCESS,
-            "reason": "no_comments_exist" if platform_comment_count == 0 else "no_comments_returned",
-        }
+        return {**base, "status": st.SUCCESS, "reason": "no_comments_returned"}
 
     return {
         **base,

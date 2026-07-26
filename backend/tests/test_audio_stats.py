@@ -16,11 +16,18 @@ def test_wpm_separates_overall_from_active_narration():
 
     assert stats["voiceover_present"]["value"] is True
     assert stats["spoken_word_count"]["value"] == 13
-    # overall: 13 words over 49s ≈ 16 wpm; narration: 13 words over 8s ≈ 98 wpm
-    assert stats["overall_wpm"]["value"] == round(13 / (49 / 60))
-    assert stats["active_narration_wpm"]["value"] == round(13 / (8 / 60))
-    assert stats["overall_wpm"]["value"] < stats["active_narration_wpm"]["value"]
+    # overall: 13 words over 49s ≈ 15.9 wpm; narration: 13 words over 8s ≈ 97.5 wpm
+    assert stats["overall_video_wpm"]["value"] == round(13 / (49 / 60), 1)
+    assert stats["active_narration_wpm"]["value"] == round(13 / (8 / 60), 1)
+    assert stats["overall_video_wpm"]["value"] < stats["active_narration_wpm"]["value"]
     assert stats["active_narration_seconds"]["value"] == 8.0
+    # R1.5: renamed span field + explicit silence-inside-span field
+    assert stats["voiceover_span_seconds"]["value"] == 45.0  # 45.0 - 0.0
+    assert stats["silence_or_render_wait_seconds"]["value"] == 37.0  # 45s span - 8s narration
+    # Deprecated aliases carry the SAME values with a deprecation note.
+    assert stats["voiceover_duration_seconds"]["value"] == stats["voiceover_span_seconds"]["value"]
+    assert stats["overall_wpm"]["value"] == stats["overall_video_wpm"]["value"]
+    assert "voiceover_duration_seconds" in stats["_deprecated"]
 
 
 def test_silence_periods_capture_render_gaps():

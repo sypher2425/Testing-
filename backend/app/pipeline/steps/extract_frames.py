@@ -304,6 +304,12 @@ class ExtractFramesStep(PipelineStep):
         settings = extract_kwargs["settings"]
         if not ctx.options.get("opening_dense_enabled", True):
             ctx.info("Opening-dense frames disabled for this job")
+            ctx.shared["opening_dense_config"] = {
+                "enabled": False,
+                "duration_seconds": None,
+                "interval_seconds": None,
+                "source": "user_interface",
+            }
             return []
         duration = extract_kwargs["duration"]
         window = float(ctx.options.get("opening_dense_duration") or settings.OPENING_DENSE_DURATION)
@@ -318,6 +324,19 @@ class ExtractFramesStep(PipelineStep):
             t += interval
         if not timestamps:
             return []
+
+        # Record the *effective* config so the manifest can show what
+        # actually ran, not the raw (possibly-null) request. Source label
+        # tells the reader where each value came from.
+        user_duration = ctx.options.get("opening_dense_duration")
+        user_interval = ctx.options.get("opening_dense_interval")
+        config_source = "user_interface" if (user_duration is not None or user_interval is not None) else "default_configuration"
+        ctx.shared["opening_dense_config"] = {
+            "enabled": True,
+            "duration_seconds": window,
+            "interval_seconds": interval,
+            "source": config_source,
+        }
 
         ctx.info(
             f"Extracting {len(timestamps)} opening-dense frames "
@@ -345,7 +364,7 @@ class ExtractFramesStep(PipelineStep):
                         "frame": start_index + len(entries),
                         "timestamp": ts,
                         "image": f"opening_dense/{filename}",
-                        "mode": ctx.options.get("mode", "adaptive"),
+                        "mode": "dense_interval",  # R1.5: was inheriting the job's mode, which was contradictory
                         "category": "opening_dense",
                         "extraction_reason": f"Dense sampling of the first {window:.2f}s (every {interval:.2f}s)",
                         "transcript_segment_index": _segment_index_at(segments, ts),
@@ -359,6 +378,12 @@ class ExtractFramesStep(PipelineStep):
         """Frames just before / at / just after each user-declared event, with
         perceptual-hash suppression of near-identical frames."""
         events = [e for e in (ctx.options.get("events") or []) if isinstance(e.get("time_seconds"), (int, float))]
+        # Record what actually ran either way, so the manifest can't drift.
+        ctx.shared["key_events_config"] = {
+            "enabled": bool(events),
+            "offsets_seconds": [-0.25, 0.0, 0.25],
+            "event_count": len(events),
+        }
         if not events:
             return []
 
@@ -406,7 +431,7 @@ class ExtractFramesStep(PipelineStep):
                             "frame": start_index + len(entries),
                             "timestamp": round(ts, 3),
                             "image": f"key_events/{filename}",
-                            "mode": ctx.options.get("mode", "adaptive"),
+                            "mode": "key_event",  # R1.5: was inheriting the job's mode, which was contradictory
                             "category": "key_event",
                             "extraction_reason": f"Key event '{label}' ({offset:+.2f}s)",
                             "event_id": event_id,

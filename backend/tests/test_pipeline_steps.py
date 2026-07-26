@@ -379,7 +379,7 @@ def test_fetch_source_step_url_success_merges_manual_override(tmp_path):
     assert perf["fields_from"]["title"] == "manual"
     assert perf["view_count"] == 1000  # auto value, no manual override given
     assert perf["fields_from"]["view_count"] == "auto"
-    assert perf["fields_status"]["view_count"] == {"status": "success", "source": "auto"}
+    assert perf["fields_status"]["view_count"] == {"status": "success", "source": "auto", "precision": "exact"}
     assert perf["platform"] == "youtube"
 
     # original_filename should be updated to the manual title override.

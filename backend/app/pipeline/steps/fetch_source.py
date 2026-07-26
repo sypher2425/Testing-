@@ -12,6 +12,7 @@ just falls back to manual fields (or nulls) and logs a warning.
 """
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_settings
@@ -19,6 +20,7 @@ from app.pipeline.base import PipelineStep
 from app.pipeline.context import PipelineContext
 from app.pipeline.errors import PipelineFailedError
 from app.utils.disk import ensure_enough_disk
+from app.utils.url_canonical import canonicalize
 from app.utils.ytdlp import (
     VideoMetadata,
     YtDlpError,
@@ -82,6 +84,22 @@ class FetchSourceStep(PipelineStep):
         except YtDlpError as exc:
             self._log_ytdlp_failure(ctx, "metadata fetch", exc)
             raise PipelineFailedError(exc.code, exc.message, exc.to_detail()) from exc
+
+        # Snapshot moment: the metrics we're about to store were true at
+        # THIS instant. Recorded so a dataset regenerated a week later can
+        # be distinguished from the earlier one.
+        performance_fetched_at = datetime.now(timezone.utc).isoformat()
+        ctx.shared["performance_fetched_at"] = performance_fetched_at
+
+        # URL canonicalization (R1.5): keep the original for debugging,
+        # add canonical + platform_post_id for identity/dedup.
+        canonical = canonicalize(source_url)
+        ctx.shared["url_canonical"] = {
+            "original": canonical.original,
+            "canonical": canonical.canonical,
+            "platform": canonical.platform,
+            "platform_post_id": canonical.post_id,
+        }
 
         ctx.info(f"Resolved source URL via yt-dlp: platform={metadata.platform}, title={metadata.title!r}")
         missing = [
@@ -251,7 +269,14 @@ class FetchSourceStep(PipelineStep):
         fields_status: dict[str, dict] = {}
         for key in ("view_count", "like_count", "comment_count", "share_count"):
             if merged[key] is not None:
-                fields_status[key] = {"status": "success", "source": fields_from.get(key, "auto")}
+                # R1.5: precision. yt-dlp values are exact per the extractor's
+                # own claim; manual entries are exact by definition (the user
+                # typed the value they know).
+                fields_status[key] = {
+                    "status": "success",
+                    "source": fields_from.get(key, "auto"),
+                    "precision": "exact",
+                }
             elif (metadata.platform, key) in cls._METRIC_NOT_AVAILABLE:
                 fields_status[key] = {
                     "status": "not_available",

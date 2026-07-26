@@ -176,16 +176,33 @@ def test_extract_comments_tiktok_is_unsupported_without_attempting():
     mock_run.assert_not_called()
 
 
-def test_extract_comments_zero_results_with_platform_count_is_flagged():
+def test_extract_comments_zero_results_on_capable_platform_flagged_as_unexpected():
+    """Instagram's public_comment_text capability is *false* in R1.5 too, so
+    IG zero-results is 'unsupported'. We use a platform that DOES have the
+    capability (YouTube) to test the unexpected_empty_result branch."""
+    fake_proc = _completed(["yt-dlp"], returncode=0, stdout=json.dumps({"comments": []}).encode())
+    with patch("app.utils.ytdlp._run", return_value=fake_proc):
+        result = extract_comments(
+            "https://youtu.be/x", limit=10, log=_noop_log,
+            platform="youtube", platform_comment_count=378,
+        )
+    assert result["status"] == "unexpected_empty_result"
+    assert result["reason"] == "zero_results_unexpected"
+    assert result["platform_comment_count"] == 378
+
+
+def test_extract_comments_zero_results_on_incapable_platform_flagged_as_unsupported():
+    """R1.5: Instagram (public_comment_text=false in capabilities) with a
+    non-zero platform count and empty extraction is 'unsupported', not a
+    failure to fetch — the extractor simply doesn't do that job."""
     fake_proc = _completed(["yt-dlp"], returncode=0, stdout=json.dumps({"comments": []}).encode())
     with patch("app.utils.ytdlp._run", return_value=fake_proc):
         result = extract_comments(
             "https://instagram.com/reel/x", limit=10, log=_noop_log,
             platform="instagram", platform_comment_count=378,
         )
-    assert result["status"] == "extraction_failed"
-    assert result["reason"] == "zero_results_unexpected"
-    assert result["platform_comment_count"] == 378
+    assert result["status"] == "unsupported"
+    assert "not supported" in result["reason"].lower()
 
 
 def test_extract_comments_auth_and_rate_limit_classification():
@@ -200,14 +217,14 @@ def test_extract_comments_auth_and_rate_limit_classification():
     assert result["status"] == "rate_limited"
 
 
-def test_extract_comments_no_comments_exist_is_a_clean_success():
+def test_extract_comments_platform_count_zero_uses_no_comments_status():
+    """R1.5: platform reports 0 comments → dedicated no_comments status."""
     fake_proc = _completed(["yt-dlp"], returncode=0, stdout=json.dumps({"comments": []}).encode())
     with patch("app.utils.ytdlp._run", return_value=fake_proc):
         result = extract_comments(
             "https://youtu.be/x", limit=10, log=_noop_log, platform="youtube", platform_comment_count=0
         )
-    assert result["status"] == "success"
-    assert result["reason"] == "no_comments_exist"
+    assert result["status"] == "no_comments"
 
 
 def test_run_copies_cookies_to_scratch_and_leaves_original_untouched(tmp_path):

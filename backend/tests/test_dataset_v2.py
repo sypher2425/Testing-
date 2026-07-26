@@ -276,9 +276,11 @@ def test_manifest_v2_shape(tmp_path):
     GenerateMetadataStep().run(ctx)
 
     manifest = json.loads(ctx.storage.get(ctx.job_relative("manifest.json")).read_bytes())
-    assert manifest["dataset_schema_version"] == "2.0"
+    assert manifest["dataset_schema_version"] == "2.1"
     assert manifest["source_video_sha256"] == "ab" * 32
     assert manifest["frame_counts"]["adaptive"] == 1
+    assert manifest["total_frame_count"] == 1  # R1.5
+    assert manifest["frame_count_legacy_meaning"] == "adaptive_frames_only"
     assert manifest["extraction_report"][0]["stage"] == "probing"
     assert manifest["posting_context"]["platform"]["value"] == "youtube"
     assert manifest["analysis_summary"]["object_first_visible_seconds"]["value"] == 1.8
@@ -287,6 +289,11 @@ def test_manifest_v2_shape(tmp_path):
     assert manifest["frame_count"] == 1
     assert manifest["performance"]["view_count"] == 100
     assert manifest["analyses"] == {}
+    # R1.5 additions
+    assert manifest["identity"]["dataset_id"] == ctx.job_id
+    assert manifest["identity"]["platform"] == "youtube"
+    assert manifest["platform_capabilities"]["platform"] == "youtube"
+    assert manifest["validation"]["status"] in ("success", "warning")
 
     # Files written alongside the manifest.
     assert ctx.storage.exists(ctx.job_relative("content", "caption.txt"))
@@ -297,6 +304,92 @@ def test_manifest_v2_shape(tmp_path):
 
     engagement = json.loads(ctx.storage.get(ctx.job_relative("analytics", "performance.json")).read_bytes())
     assert engagement["rates"]["like_rate"]["value"] == 0.05
+
+
+def test_r15_dense_and_key_event_frames_have_correct_modes(tmp_path):
+    """R1.5 regression: dense frames must not be labeled mode=adaptive."""
+    from app.pipeline.steps.extract_frames import ExtractFramesStep
+    from unittest.mock import patch
+
+    # `interval` mode avoids scene-detect and doesn't need a real file.
+    ctx, _, _ = make_ctx(
+        tmp_path,
+        options={
+            "mode": "interval",
+            "interval_ms": 1000,
+            "frame_format": "jpeg",
+            "frame_max_dim": 1280,
+            "opening_dense_enabled": True,
+            "opening_dense_duration": 2.0,
+            "opening_dense_interval": 0.25,
+            "events": [{"time_seconds": 3.0, "type": "first_interaction"}],
+        },
+    )
+    ctx.shared["video"] = {"duration_seconds": 10.0, "fps": 25.0, "has_audio": False}
+    ctx.shared["source_relative_path"] = ctx.job_relative("source", "video.mp4")
+
+    def fake_extract(source, output_path, timestamp, **kwargs):
+        with open(output_path, "wb") as f:
+            f.write(b"jpg")
+
+    with patch("app.pipeline.steps.extract_frames.extract_frame_at", side_effect=fake_extract), patch(
+        "app.pipeline.steps.extract_frames._average_hash", return_value=None
+    ):
+        ExtractFramesStep().run(ctx)
+
+    dense = [f for f in ctx.shared["frames"] if f["category"] == "opening_dense"]
+    key_events = [f for f in ctx.shared["frames"] if f["category"] == "key_event"]
+    assert all(f["mode"] == "dense_interval" for f in dense), "dense frames must use mode=dense_interval, not adaptive"
+    assert all(f["mode"] == "key_event" for f in key_events), "key-event frames must use mode=key_event, not adaptive"
+    # Effective config was stashed for the manifest.
+    assert ctx.shared["opening_dense_config"] == {
+        "enabled": True,
+        "duration_seconds": 2.0,
+        "interval_seconds": 0.25,
+        "source": "user_interface",
+    }
+
+
+def test_r15_engagement_rate_uses_calculated_status_and_precision(tmp_path):
+    result = build_engagement_breakdown(
+        {
+            "view_count": 1000,
+            "like_count": 50,
+            "comment_count": 5,
+            "share_count": None,
+            "fields_status": {
+                "view_count": {"status": "success", "source": "auto", "precision": "exact"},
+                "like_count": {"status": "success", "source": "auto", "precision": "exact"},
+                "comment_count": {"status": "success", "source": "auto", "precision": "exact"},
+            },
+        }
+    )
+    like_rate = result["rates"]["like_rate"]
+    assert like_rate["status"] == "calculated"
+    assert like_rate["precision"] == "exact"
+    assert like_rate["numerator_field"] == "likes"
+    assert like_rate["denominator_field"] == "views"
+    assert like_rate["value"] == 0.05
+    # Views + likes both exact → rate stays exact.
+
+
+def test_r15_rate_precision_downgrades_with_rounded_input():
+    result = build_engagement_breakdown(
+        {
+            "view_count": 1_000_000,
+            "like_count": 16_000,
+            "comment_count": None,
+            "share_count": None,
+            "fields_status": {
+                "view_count": {"status": "success", "source": "auto", "precision": "exact"},
+                "like_count": {"status": "success", "source": "manual", "precision": "rounded"},
+            },
+        }
+    )
+    like_rate = result["rates"]["like_rate"]
+    # Not fake six-decimals: derived from a rounded input.
+    assert like_rate["precision"] == "derived_from_rounded"
+    assert like_rate["value"] == 0.016  # rounded to 4 decimals, not 6
 
 
 def test_manifest_v2_upload_without_source_platform(tmp_path):
