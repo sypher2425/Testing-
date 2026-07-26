@@ -82,3 +82,36 @@ def category_for_key_event_offset(offset_seconds: float) -> str:
 
 def is_valid_combo(mode: str, category: str) -> bool:
     return (mode, category) in VALID_COMBOS
+
+
+def describe_frame(entry: dict) -> str:
+    """Human-readable description generated from the frame's OWN metadata.
+
+    This is the single source of truth for frame descriptions: the manifest
+    generator writes it into frames.json and the files[] list, and the
+    validator recomputes it to catch any drift. Never inline description
+    strings elsewhere — a dense frame described as "adaptive" was exactly
+    the schema-2.1 bug this replaces.
+    """
+    timestamp = entry.get("timestamp")
+    ts = f"t={timestamp}s" if timestamp is not None else "unknown time"
+    category = entry.get("category")
+    if category == CATEGORY_OPENING_DENSE:
+        return f"Extracted opening-dense frame at {ts} using dense interval mode."
+    if category in (
+        CATEGORY_KEY_EVENT,
+        CATEGORY_KEY_EVENT_BEFORE,
+        CATEGORY_KEY_EVENT_EXACT,
+        CATEGORY_KEY_EVENT_AFTER,
+    ):
+        reason = entry.get("extraction_reason") or "key event"
+        return f"Extracted key-event frame at {ts} ({reason})."
+    if category == CATEGORY_MANUAL_REFERENCE:
+        return f"Manually supplied reference frame at {ts}."
+    # Adaptive main series — and the total-function fallback for legacy
+    # entries with no category (schema v1 frames were all adaptive).
+    mode = entry.get("mode") or MODE_ADAPTIVE
+    desc = f"Extracted frame #{entry.get('frame')} at {ts} ({mode} mode)"
+    if entry.get("scene_id") is not None:
+        desc += f", scene {entry['scene_id']}"
+    return desc

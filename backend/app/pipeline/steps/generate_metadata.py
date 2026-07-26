@@ -7,7 +7,6 @@ Dataset schema v2 adds statuses for everything that could not be extracted —
 values are never fabricated and missing data is never coerced to 0.
 """
 import json
-from datetime import datetime, timezone
 
 from app.config import get_settings
 from app.pipeline.base import PipelineStep
@@ -21,7 +20,9 @@ from app.utils.dataset_v2 import (
     build_posting_context,
     normalize_events,
 )
+from app.utils.frame_schema import describe_frame
 from app.utils.platform_capabilities import capabilities_for
+from app.utils.timestamps import now_utc_iso
 from app.utils.validation import validate_dataset
 
 
@@ -42,6 +43,12 @@ class GenerateMetadataStep(PipelineStep):
         }
         frames = ctx.shared.get("frames") or []
         mode = ctx.shared["mode"]
+
+        # v2.2: every frame's description comes from its OWN metadata via the
+        # shared describe_frame helper (the validator recomputes the same
+        # string) — a dense frame is never again described as "adaptive".
+        for frame in frames:
+            frame.setdefault("description", describe_frame(frame))
 
         frames_json_bytes = json.dumps(frames, indent=2).encode()
         ctx.storage.save_bytes(ctx.job_relative("metadata", "frames.json"), frames_json_bytes)
@@ -89,11 +96,12 @@ class GenerateMetadataStep(PipelineStep):
 
         for frame in frames:
             rel = ctx.job_relative("frames", frame["image"])
-            desc = f"Extracted frame #{frame['frame']} at t={frame['timestamp']}s ({mode} mode)"
-            if frame.get("scene_id") is not None:
-                desc += f", scene {frame['scene_id']}"
             files.append(
-                {"path": f"frames/{frame['image']}", "description": desc, "size_bytes": ctx.storage.size_of(rel)}
+                {
+                    "path": f"frames/{frame['image']}",
+                    "description": frame["description"],
+                    "size_bytes": ctx.storage.size_of(rel),
+                }
             )
 
         files.append(
@@ -160,7 +168,11 @@ class GenerateMetadataStep(PipelineStep):
             files.append(
                 {"path": "content/caption.txt", "description": "Exact post caption/description from the source", "size_bytes": len(caption_bytes)}
             )
-            content_status["caption"] = {"status": st.SUCCESS, "source": st.SOURCE_AUTO}
+            content_status["caption"] = {
+                "status": st.SUCCESS,
+                "source": st.SOURCE_YT_DLP,
+                "entry_method": st.ENTRY_AUTOMATIC,
+            }
         else:
             content_status["caption"] = {
                 "status": st.MANUAL_REQUIRED,
@@ -238,13 +250,24 @@ class GenerateMetadataStep(PipelineStep):
         }
         extraction_params: dict = {
             k: ctx.options.get(k)
-            for k in ("interval_ms", "target_frames", "frame_format", "frame_max_dim",
-                      "opening_dense_enabled", "opening_dense_duration", "opening_dense_interval")
+            for k in ("interval_ms", "target_frames", "frame_format", "frame_max_dim")
             if k in ctx.options
         }
         extraction_params["mode"] = mode
         extraction_params["opening_dense"] = dense_config
         extraction_params["key_events"] = key_events_config
+        # v2.2: the nested opening_dense block is canonical. The flat keys are
+        # deprecated but always written FROM the effective config, so they can
+        # never be null while enabled and never contradict the nested values
+        # (they used to echo the raw — possibly null — request).
+        extraction_params["opening_dense_enabled"] = dense_config["enabled"]
+        extraction_params["opening_dense_duration"] = dense_config["duration_seconds"]
+        extraction_params["opening_dense_interval"] = dense_config["interval_seconds"]
+        extraction_params["_deprecated"] = {
+            "opening_dense_enabled": "Use extraction_params.opening_dense.enabled (canonical since schema v2.2)",
+            "opening_dense_duration": "Use extraction_params.opening_dense.duration_seconds (canonical since schema v2.2)",
+            "opening_dense_interval": "Use extraction_params.opening_dense.interval_seconds (canonical since schema v2.2)",
+        }
 
         # R1.5: performance snapshot metadata + identity block.
         url_canonical = ctx.shared.get("url_canonical") or {}
@@ -267,7 +290,7 @@ class GenerateMetadataStep(PipelineStep):
                 "platform": resolved_platform,
             }
 
-        manifest_generated_at = datetime.now(timezone.utc).isoformat()
+        manifest_generated_at = now_utc_iso()
         identity_block = {
             "dataset_id": ctx.job_id,
             "platform": resolved_platform,
@@ -349,5 +372,5 @@ class GenerateMetadataStep(PipelineStep):
         manifest_bytes = json.dumps(manifest, indent=2).encode()
         ctx.storage.save_bytes(ctx.job_relative("manifest.json"), manifest_bytes)
         ctx.shared["manifest"] = manifest
-        ctx.info(f"manifest.json written (dataset schema v2.1, validation={report.status})")
+        ctx.info(f"manifest.json written (dataset schema v{DATASET_SCHEMA_VERSION}, validation={report.status})")
         ctx.set_step_progress(self.name, 100)

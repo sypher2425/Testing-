@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_settings
+from app.utils.timestamps import now_utc_iso
 
 # Substrings that indicate the *video itself* is unavailable — updating
 # yt-dlp will not help here, so these are never eligible for the
@@ -458,7 +459,7 @@ def extract_comments(
     base = {
         "platform_comment_count": platform_comment_count,
         "extracted_comment_count": 0,
-        "attempted_at": datetime.now(timezone.utc).isoformat(),
+        "attempted_at": now_utc_iso(),
         "error": None,
         "comments": [],
     }

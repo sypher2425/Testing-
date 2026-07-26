@@ -60,19 +60,39 @@ def compute_audio_stats(
         if duration_seconds and duration_seconds - previous_end >= SILENCE_GAP_THRESHOLD_SECONDS:
             silence_periods.append({"start": round(previous_end, 2), "end": round(duration_seconds, 2)})
 
+        # v2.2: the two silence numbers measure DIFFERENT things and now say
+        # so. The total counts every non-speaking second between the first
+        # and last spoken word; the listed periods are only the long gaps
+        # (>= threshold) but scan the whole video including the stretches
+        # before the first and after the last word. Neither implies the other.
+        listed_periods = [
+            {**p, "duration_seconds": round(p["end"] - p["start"], 2)} for p in silence_periods
+        ]
+        silence_analysis = {
+            "status": st.SUCCESS,
+            "total_non_narration_seconds": round(silence_within_span, 2),
+            "total_scope": "all_gaps_within_voiceover_span",
+            "listed_periods_minimum_duration_seconds": SILENCE_GAP_THRESHOLD_SECONDS,
+            "listed_periods_scope": "full_video_gaps_over_threshold",
+            "listed_periods": listed_periods,
+            "listed_periods_total_seconds": round(sum(p["duration_seconds"] for p in listed_periods), 2),
+        }
+
         result.update(
             {
                 # R1.5 field names — precise about what each one measures.
                 "voiceover_span_seconds": field(round(voiceover_span, 2), st.SUCCESS),
                 "active_narration_seconds": field(round(narration_seconds, 2), st.SUCCESS),
-                "silence_or_render_wait_seconds": field(round(silence_within_span, 2), st.SUCCESS),
                 "spoken_word_count": field(word_count, st.SUCCESS),
                 "overall_video_wpm": field(overall_wpm, st.SUCCESS if overall_wpm is not None else st.NOT_AVAILABLE),
                 "active_narration_wpm": field(
                     narration_wpm, st.SUCCESS if narration_wpm is not None else st.NOT_AVAILABLE
                 ),
+                "silence_analysis": silence_analysis,
+                # Deprecated aliases kept for backward compat with the
+                # R1/R1.5 shapes — values always mirror the canonical fields.
                 "silence_periods": field(silence_periods, st.SUCCESS),
-                # Deprecated alias kept for backward compat with the R1 shape.
+                "silence_or_render_wait_seconds": field(round(silence_within_span, 2), st.SUCCESS),
                 "voiceover_duration_seconds": field(round(voiceover_span, 2), st.SUCCESS),
                 "overall_wpm": field(overall_wpm, st.SUCCESS if overall_wpm is not None else st.NOT_AVAILABLE),
             }
@@ -84,16 +104,26 @@ def compute_audio_stats(
         for key in (
             "voiceover_span_seconds",
             "active_narration_seconds",
-            "silence_or_render_wait_seconds",
             "spoken_word_count",
             "overall_video_wpm",
             "active_narration_wpm",
-            "silence_periods",
             # Deprecated aliases: keep them non-null-shaped for R1 consumers.
+            "silence_periods",
+            "silence_or_render_wait_seconds",
             "voiceover_duration_seconds",
             "overall_wpm",
         ):
             result[key] = field(None, st.NOT_AVAILABLE, reason=no_speech_reason)
+        result["silence_analysis"] = {
+            "status": st.NOT_AVAILABLE,
+            "reason": no_speech_reason,
+            "total_non_narration_seconds": None,
+            "total_scope": "all_gaps_within_voiceover_span",
+            "listed_periods_minimum_duration_seconds": SILENCE_GAP_THRESHOLD_SECONDS,
+            "listed_periods_scope": "full_video_gaps_over_threshold",
+            "listed_periods": [],
+            "listed_periods_total_seconds": None,
+        }
 
     music = music_info or {}
     if music.get("track"):
@@ -109,10 +139,22 @@ def compute_audio_stats(
     result["_deprecated"] = {
         "voiceover_duration_seconds": "Renamed to voiceover_span_seconds in schema v2.1 (same value; span from first to last spoken word)",
         "overall_wpm": "Renamed to overall_video_wpm in schema v2.1 (same value; words / full video duration)",
+        "silence_or_render_wait_seconds": (
+            "Superseded by silence_analysis.total_non_narration_seconds in schema v2.2 "
+            "(same value; every non-speaking second inside the voiceover span)"
+        ),
+        "silence_periods": (
+            "Superseded by silence_analysis.listed_periods in schema v2.2 (same gaps, "
+            "plus per-period duration and an explicit scope/threshold declaration)"
+        ),
     }
 
     return result
 
 
 def field(value, status: str, reason: str | None = None) -> dict:
-    return st.field_result(value, status, source=st.SOURCE_AUTO if status == st.SUCCESS else None, reason=reason)
+    # Successful values here are derived from the transcript by this module —
+    # provenance "computed", entered automatically (v2.2 vocabulary).
+    if status == st.SUCCESS:
+        return st.field_result(value, status, source=st.SOURCE_COMPUTED, reason=reason, entry_method=st.ENTRY_AUTOMATIC)
+    return st.field_result(value, status, source=None, reason=reason)

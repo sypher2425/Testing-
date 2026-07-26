@@ -33,6 +33,7 @@ from app.storage.base import StorageBackend
 from app.utils.disk import ensure_enough_disk
 from app.utils.ffmpeg import FFmpegError, ffprobe
 from app.utils.filenames import is_safe_relative_path, sanitize_filename
+from app.utils.manifest_compat import normalize_frames
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -539,10 +540,11 @@ def list_frames(
     rel = f"{job_id}/metadata/frames.json"
     if not storage.exists(rel):
         return FrameListResponse(frames=[], total=0, page=page, page_size=page_size)
-    frames = json.loads(storage.get(rel).read_bytes())
+    # normalize_frames backfills what v1 datasets lack (category — every
+    # frame was adaptive — mode, and a description) without touching disk.
+    frames = normalize_frames(json.loads(storage.get(rel).read_bytes()))
     if category != "all":
-        # v1 datasets have no category key — every frame was adaptive.
-        frames = [f for f in frames if f.get("category", "adaptive") == category]
+        frames = [f for f in frames if f.get("category") == category]
     total = len(frames)
     start = (page - 1) * page_size
     page_items = frames[start : start + page_size]

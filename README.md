@@ -156,7 +156,7 @@ concurrency 1 is the stable configuration.
   comments/extraction_status.json   # WHY comments are (or aren't) there
   performance/comments.json         # legacy v1 shape, kept for backward compat
   events.json                       # manual-first timeline events (hook, twists, CTA...)
-  manifest.json                     # dataset_schema_version: "2.0"
+  manifest.json                     # dataset_schema_version: "2.2"
   output.zip
 ```
 
@@ -232,8 +232,99 @@ treat a missing `dataset_schema_version` as `1.0`.
   references and `status: "calculated"`.
 - `metadata/validation_report.json` records the pre-export validator's
   status (`success` / `warning` / `error`), warnings list, errors list,
-  and `validated_at`. Structural errors fail the job; warnings ship with
-  the dataset so downstream consumers can see them.
+  and `validated_at`. Validation is report-only (the dataset still ships)
+  but a dataset with any finding never reports a clean `success`.
+
+### Schema v2.2 additions (round 1 stabilization)
+
+**Canonical dense configuration.** `extraction_params.opening_dense`
+(`{enabled, duration_seconds, interval_seconds, source}`) is the canonical
+record of the dense-opening extraction that actually ran. The flat keys
+`opening_dense_enabled` / `opening_dense_duration` / `opening_dense_interval`
+are **deprecated**: they are still written for v1 readers, but always
+back-filled from the canonical block, so they can never be `null` while
+dense extraction is enabled and never disagree with it. An
+`extraction_params._deprecated` map documents each one.
+
+**Per-frame descriptions.** Every entry in `metadata/frames.json` (and the
+matching `files[]` entry in the manifest) carries a `description` generated
+from the frame's *own* metadata — mode, category, timestamp,
+extraction_reason — via one shared helper (`app/utils/frame_schema.py:
+describe_frame`), e.g. `Extracted opening-dense frame at t=2.25s using
+dense interval mode.` A dense frame can no longer be described as adaptive;
+the validator recomputes the same string and flags any disagreement.
+
+**Timestamp policy.** All generated processing timestamps are ISO 8601 with
+an explicit UTC offset (`2026-07-26T10:00:19.668895+00:00`), produced by the
+single shared utility `app/utils/timestamps.py`. Naive timestamps found in
+older datasets are normalized (assumed UTC) with a compatibility warning —
+they never prevent a dataset from loading.
+
+**Posting-date precision.** A calendar date is not an exact timestamp.
+`posting_context.posted_at` is now `{value, status, source, entry_method,
+precision, timezone}` with temporal precision from `exact_datetime · minute
+· hour · date_only · month_only · unknown` (yt-dlp upload dates are
+`date_only`, timezone `null`). When a more precise value is supplied later,
+`upgrade_posted_at` accepts it only if strictly finer and preserves the
+superseded record under `posted_at.provenance` — original provenance is
+never lost.
+
+**Source vs entry method.** `source` now means true provenance — `yt_dlp`
+(scraped from the platform), `user` (a person supplied it), `computed`
+(derived from other extracted data; e.g. all audio stats) — and the new
+`entry_method` (`automatic` / `manual`) records how it got into the
+dataset. The old `source: "auto"` label is deprecated: legacy datasets map
+`auto → yt_dlp/computed + automatic` and `manual → user + manual` at read
+time. `performance.fields_from` intentionally keeps its `auto`/`manual`
+values — it is a stable UI contract.
+
+**Silence analysis.** `content/audio.json` gains a `silence_analysis` block
+that makes every number's scope explicit: `total_non_narration_seconds`
+(scope `all_gaps_within_voiceover_span` — every non-speaking second between
+the first and last spoken word), and `listed_periods` (scope
+`full_video_gaps_over_threshold` — gaps ≥ the declared
+`listed_periods_minimum_duration_seconds`, including lead-in and tail),
+each with `duration_seconds`, plus `listed_periods_total_seconds`. The two
+totals measure different things and now say so; the legacy
+`silence_or_render_wait_seconds` / `silence_periods` keys remain as
+deprecated aliases that always mirror the canonical values.
+
+**Migration behavior.** `app/utils/manifest_compat.py` is the single home
+for reading older datasets: `detect_schema_version` (missing → 1.0),
+`normalize_manifest` (synthesizes the nested dense block from flat keys,
+upgrades `posted_at`, normalizes naive timestamps — always in memory, with
+warnings), and `normalize_frames` (backfills category/description on v1
+frame lists). Old ZIPs and job folders are **never modified**; v1, v2.0,
+and v2.1 datasets all remain loadable.
+
+**Validation codes.** The validator emits stable codes. Structural
+contradictions are *errors* on freshly generated (≥2.2) datasets and
+*warnings* on legacy ones — either way the result is never `success`:
+
+| Code | Meaning |
+|---|---|
+| `dense_config_null` | dense enabled but duration/interval null (always an error) |
+| `dense_legacy_canonical_mismatch` | flat dense keys disagree with the canonical block |
+| `dense_config_missing` | flat keys present but canonical block absent |
+| `frame_description_mismatch` | a description disagrees with the frame's metadata |
+| `dense_frame_described_as_adaptive` | the original R1 description bug |
+| `incompatible_mode_category` / `invalid_frame_mode` / `invalid_frame_category` | frame enum violations |
+| `frame_count_mismatch` | declared counts vs files on disk |
+| `frame_category_count_mismatch` | declared counts vs frame metadata |
+| `total_frame_count_mismatch` | total vs per-category sum |
+| `naive_timestamp` | a generated stamp without a UTC offset |
+| `posted_at_missing_precision` / `invalid_temporal_precision` / `posted_at_precision_value_mismatch` | posting-date precision issues |
+| `silence_totals_ambiguous` | legacy silence keys with no scoped analysis block |
+| `silence_listed_total_mismatch` / `silence_period_below_threshold` | listed periods don't reconcile |
+| `deprecated_field_mismatch` | a deprecated alias contradicts its canonical replacement |
+| `deprecated_source_label` | `source: "auto"` written by a ≥2.2 dataset |
+| `invalid_entry_method` / `invalid_status` / `invalid_precision` / `silent_zero` | vocabulary violations |
+| `missing_schema_version` / `missing_source_dir` / `missing_performance_snapshot` / `identity_inconsistent` / `audio_wpm_ordering` / `nested_dataset` | pre-existing checks, unchanged |
+
+**Explicitly excluded from this round** (deferred to Round 2): enrichment
+UI, OCR, AI/Gemini integration, automatic event detection, retention
+estimation, comment summarization, demographic import, and adaptive-frame
+perceptual deduplication.
 
 ## API
 

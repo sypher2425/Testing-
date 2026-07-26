@@ -245,8 +245,15 @@ def test_manifest_v2_shape(tmp_path):
     ctx.shared["source_sha256"] = "ab" * 32
     ctx.shared["frame_count"] = 1
     ctx.shared["frame_counts_by_category"] = {"adaptive": 1, "opening_dense": 0, "key_events": 0}
+    # Stamps must be tz-aware — the v2.2 validator errors on naive ones.
     ctx.shared["stage_reports"] = [
-        {"stage": "probing", "status": "success", "started_at": "x", "completed_at": "y", "error": None}
+        {
+            "stage": "probing",
+            "status": "success",
+            "started_at": "2026-01-01T00:00:01+00:00",
+            "completed_at": "2026-01-01T00:00:02+00:00",
+            "error": None,
+        }
     ]
     ctx.storage.save_bytes(ctx.job_relative("source", "video.mp4"), b"fake")
     ctx.shared["video"] = {"duration_seconds": 5.0, "width": 640, "height": 480, "fps": 30.0, "codec": "h264", "has_audio": True}
@@ -276,13 +283,27 @@ def test_manifest_v2_shape(tmp_path):
     GenerateMetadataStep().run(ctx)
 
     manifest = json.loads(ctx.storage.get(ctx.job_relative("manifest.json")).read_bytes())
-    assert manifest["dataset_schema_version"] == "2.1"
+    assert manifest["dataset_schema_version"] == "2.2"
     assert manifest["source_video_sha256"] == "ab" * 32
     assert manifest["frame_counts"]["adaptive"] == 1
     assert manifest["total_frame_count"] == 1  # R1.5
     assert manifest["frame_count_legacy_meaning"] == "adaptive_frames_only"
     assert manifest["extraction_report"][0]["stage"] == "probing"
     assert manifest["posting_context"]["platform"]["value"] == "youtube"
+    # v2.2: posted_at is a precision-aware record — a calendar date is not an
+    # exact timestamp, and provenance/entry method are separate fields.
+    posted_at = manifest["posting_context"]["posted_at"]
+    assert posted_at["value"] == "2026-01-01"
+    assert posted_at["precision"] == "date_only"
+    assert posted_at["timezone"] is None
+    assert posted_at["source"] == "yt_dlp"
+    assert posted_at["entry_method"] == "automatic"
+    # v2.2: flat dense keys are back-filled from the canonical nested block.
+    params = manifest["extraction_params"]
+    assert params["opening_dense_enabled"] == params["opening_dense"]["enabled"]
+    assert params["opening_dense_duration"] == params["opening_dense"]["duration_seconds"]
+    assert params["opening_dense_interval"] == params["opening_dense"]["interval_seconds"]
+    assert "opening_dense_duration" in params["_deprecated"]
     assert manifest["analysis_summary"]["object_first_visible_seconds"]["value"] == 1.8
     assert manifest["events_count"] == 1
     # v1 keys still present and unchanged in meaning.
@@ -419,3 +440,65 @@ def test_manifest_v2_upload_without_source_platform(tmp_path):
         ctx.storage.get(ctx.job_relative("comments", "extraction_status.json")).read_bytes()
     )
     assert extraction_status["status"] == "not_available"
+
+
+def test_upgrade_posted_at_accepts_only_finer_precision():
+    """Provenance preservation: a finer value wins but the superseded record
+    is kept; a coarser or equal value never overwrites."""
+    from app.utils.dataset_v2 import build_posted_at, upgrade_posted_at
+
+    original = build_posted_at("2026-07-23")  # yt_dlp / automatic / date_only
+    finer = {
+        "value": "2026-07-23T18:30:00+00:00",
+        "status": "success",
+        "source": "user",
+        "entry_method": "manual",
+        "precision": "exact_datetime",
+        "timezone": "UTC",
+    }
+    upgraded = upgrade_posted_at(original, finer)
+    assert upgraded["value"] == "2026-07-23T18:30:00+00:00"
+    assert upgraded["precision"] == "exact_datetime"
+    # The original yt-dlp record survives in provenance.
+    assert upgraded["provenance"][0]["value"] == "2026-07-23"
+    assert upgraded["provenance"][0]["source"] == "yt_dlp"
+    assert "recorded_at" in upgraded["provenance"][0]
+
+    # Coarser (or equal) precision never overwrites.
+    coarser = {"value": "2026-07", "status": "success", "precision": "month_only"}
+    assert upgrade_posted_at(upgraded, coarser) == upgraded
+    same = {"value": "2026-07-24", "status": "success", "precision": "date_only"}
+    assert upgrade_posted_at(original, same) == original
+
+    # An empty slot accepts anything with a value.
+    empty = {"value": None, "status": "not_available"}
+    assert upgrade_posted_at(empty, same)["value"] == "2026-07-24"
+
+
+def test_posted_at_manual_override_maps_to_user_manual():
+    from app.utils.dataset_v2 import build_posted_at
+
+    record = build_posted_at("2026-07-23", "manual")
+    assert record["source"] == "user"
+    assert record["entry_method"] == "manual"
+    assert record["precision"] == "date_only"
+
+
+def test_engagement_metrics_carry_provenance_not_auto():
+    from app.utils.dataset_v2 import build_engagement_breakdown
+
+    breakdown = build_engagement_breakdown(
+        {
+            "view_count": 100,
+            "like_count": 5,
+            "fields_status": {
+                "view_count": {"status": "success", "source": "yt_dlp", "entry_method": "automatic", "precision": "exact"},
+                "like_count": {"status": "success", "source": "auto", "precision": "exact"},  # legacy label
+            },
+        }
+    )
+    assert breakdown["metrics"]["views"]["source"] == "yt_dlp"
+    assert breakdown["metrics"]["views"]["entry_method"] == "automatic"
+    # Legacy "auto" is mapped forward, never written through.
+    assert breakdown["metrics"]["likes"]["source"] == "yt_dlp"
+    assert breakdown["metrics"]["likes"]["entry_method"] == "automatic"

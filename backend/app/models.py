@@ -7,6 +7,7 @@ from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, Stri
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.utils.timestamps import ensure_aware_iso
 
 PIPELINE_STEPS = [
     "queued",
@@ -118,10 +119,12 @@ class Job(Base):
                 if self.status == "failed"
                 else None
             ),
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            # SQLite returns these naive; serialize with an explicit UTC
+            # offset so API consumers never have to guess the timezone.
+            "created_at": ensure_aware_iso(self.created_at)[0],
+            "updated_at": ensure_aware_iso(self.updated_at)[0],
+            "started_at": ensure_aware_iso(self.started_at)[0],
+            "completed_at": ensure_aware_iso(self.completed_at)[0],
         }
 
 

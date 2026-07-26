@@ -15,6 +15,7 @@ from app.models import Job, JobLog
 from app.pipeline.context import JobCancelled, PipelineContext
 from app.pipeline.errors import PipelineFailedError
 from app.storage import get_storage
+from app.utils.timestamps import ensure_aware_iso, now_utc_iso
 
 logger = logging.getLogger("pipeline.runner")
 
@@ -128,7 +129,9 @@ def run_pipeline(job_id: str) -> None:
     ctx.shared["source_relative_path"] = ctx.job_relative("source", job.stored_source_filename)
     ctx.shared["source_url"] = job.source_url
     ctx.shared["source_sha256"] = job.source_sha256
-    ctx.shared["started_at"] = job.started_at.isoformat() if job.started_at else None
+    # SQLite hands DB datetimes back naive; attach UTC so the manifest's
+    # processing.started_at carries an offset like every other stamp.
+    ctx.shared["started_at"] = ensure_aware_iso(job.started_at)[0]
 
     persist_log("info", f"Starting pipeline for job {job_id} (mode={job.mode})")
 
@@ -147,7 +150,7 @@ def run_pipeline(job_id: str) -> None:
             stage_report = {
                 "stage": step.name,
                 "status": "success",
-                "started_at": datetime.now(timezone.utc).isoformat(),
+                "started_at": now_utc_iso(),
                 "completed_at": None,
                 "error": None,
             }
@@ -156,10 +159,10 @@ def run_pipeline(job_id: str) -> None:
             except Exception as exc:
                 stage_report["status"] = "extraction_failed"
                 stage_report["error"] = str(exc)
-                stage_report["completed_at"] = datetime.now(timezone.utc).isoformat()
+                stage_report["completed_at"] = now_utc_iso()
                 ctx.shared.setdefault("stage_reports", []).append(stage_report)
                 raise
-            stage_report["completed_at"] = datetime.now(timezone.utc).isoformat()
+            stage_report["completed_at"] = now_utc_iso()
             ctx.shared.setdefault("stage_reports", []).append(stage_report)
             set_step_progress(step.name, 100)
             persist_log("info", f"Step finished: {step.label} ({time.monotonic() - t0:.1f}s)")

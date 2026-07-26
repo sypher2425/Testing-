@@ -7,6 +7,8 @@ COOKIES_FILE) and the generic ZipOutputStep for packaging.
 import json
 import tempfile
 from datetime import datetime, timedelta, timezone
+
+from app.utils.timestamps import now_utc_iso
 from pathlib import Path
 
 from app.pipeline.base import PipelineStep
@@ -246,7 +248,7 @@ class ResearchManifestStep(PipelineStep):
                 "max_duration_seconds": params.get("max_duration_seconds"),
             },
             "result_count_requested": params.get("result_count", 15),
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "fetched_at": now_utc_iso(),
             "videos": results,
         }
         ctx.storage.save_bytes(

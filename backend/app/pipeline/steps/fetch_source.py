@@ -12,14 +12,15 @@ just falls back to manual fields (or nulls) and logs a warning.
 """
 import hashlib
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_settings
 from app.pipeline.base import PipelineStep
 from app.pipeline.context import PipelineContext
 from app.pipeline.errors import PipelineFailedError
+from app.utils import status as st
 from app.utils.disk import ensure_enough_disk
+from app.utils.timestamps import now_utc_iso
 from app.utils.url_canonical import canonicalize
 from app.utils.ytdlp import (
     VideoMetadata,
@@ -88,7 +89,7 @@ class FetchSourceStep(PipelineStep):
         # Snapshot moment: the metrics we're about to store were true at
         # THIS instant. Recorded so a dataset regenerated a week later can
         # be distinguished from the earlier one.
-        performance_fetched_at = datetime.now(timezone.utc).isoformat()
+        performance_fetched_at = now_utc_iso()
         ctx.shared["performance_fetched_at"] = performance_fetched_at
 
         # URL canonicalization (R1.5): keep the original for debugging,
@@ -214,7 +215,9 @@ class FetchSourceStep(PipelineStep):
                 performance["fields_from"]["view_count"] = "auto"
                 performance["fields_status"]["view_count"] = {
                     "status": "success",
-                    "source": "auto",
+                    # The grid scrape rides on yt-dlp's cookie/session plumbing.
+                    "source": st.SOURCE_YT_DLP,
+                    "entry_method": st.ENTRY_AUTOMATIC,
                     "reason": "Backfilled from the account's Reels grid",
                 }
 
@@ -272,9 +275,14 @@ class FetchSourceStep(PipelineStep):
                 # R1.5: precision. yt-dlp values are exact per the extractor's
                 # own claim; manual entries are exact by definition (the user
                 # typed the value they know).
+                # v2.2: source = true provenance (yt_dlp or user), separate
+                # from entry_method. fields_from keeps the legacy auto/manual
+                # labels — it's a stable UI contract.
+                entered_manually = fields_from.get(key) == "manual"
                 fields_status[key] = {
                     "status": "success",
-                    "source": fields_from.get(key, "auto"),
+                    "source": st.SOURCE_USER if entered_manually else st.SOURCE_YT_DLP,
+                    "entry_method": st.ENTRY_MANUAL if entered_manually else st.ENTRY_AUTOMATIC,
                     "precision": "exact",
                 }
             elif (metadata.platform, key) in cls._METRIC_NOT_AVAILABLE:

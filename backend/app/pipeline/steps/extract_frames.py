@@ -317,17 +317,11 @@ class ExtractFramesStep(PipelineStep):
         interval = max(interval, 0.05)
         window = min(window, duration) if duration else window
 
-        timestamps = []
-        t = 0.0
-        while t < window and len(timestamps) < 200:
-            timestamps.append(round(t, 3))
-            t += interval
-        if not timestamps:
-            return []
-
         # Record the *effective* config so the manifest can show what
         # actually ran, not the raw (possibly-null) request. Source label
-        # tells the reader where each value came from.
+        # tells the reader where each value came from. This must happen
+        # before any early return below — a zero-length window still ran
+        # with these effective values.
         user_duration = ctx.options.get("opening_dense_duration")
         user_interval = ctx.options.get("opening_dense_interval")
         config_source = "user_interface" if (user_duration is not None or user_interval is not None) else "default_configuration"
@@ -337,6 +331,14 @@ class ExtractFramesStep(PipelineStep):
             "interval_seconds": interval,
             "source": config_source,
         }
+
+        timestamps = []
+        t = 0.0
+        while t < window and len(timestamps) < 200:
+            timestamps.append(round(t, 3))
+            t += interval
+        if not timestamps:
+            return []
 
         ctx.info(
             f"Extracting {len(timestamps)} opening-dense frames "

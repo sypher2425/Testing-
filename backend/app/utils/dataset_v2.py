@@ -5,9 +5,9 @@ All builders follow the same rules: never fabricate a value, never coerce a
 missing value to 0, and label every value with a status + source
 (see app.utils.status).
 """
-from app.utils import precision, status as st
+from app.utils import precision, status as st, timestamps as ts_util
 
-DATASET_SCHEMA_VERSION = "2.1"
+DATASET_SCHEMA_VERSION = "2.2"
 
 # Engagement metrics beyond what platforms expose publicly — these can only
 # come from the creator's own analytics (manual entry / future enrichment).
@@ -65,7 +65,16 @@ def build_engagement_breakdown(performance: dict | None) -> dict:
         value = performance.get(perf_key)
         meta = fields_status.get(perf_key) or {}
         if value is not None:
-            result = st.field_result(value, st.SUCCESS, source=meta.get("source") or st.SOURCE_AUTO)
+            # v2.2: provenance (source) is separate from entry method. New
+            # fields_status records already carry both; legacy "auto"/"manual"
+            # labels are mapped forward here so re-running an old job comes
+            # out in the current vocabulary.
+            source, entry_method = st.map_legacy_source(
+                meta.get("source") or st.SOURCE_AUTO, automatic_source=st.SOURCE_YT_DLP
+            )
+            result = st.field_result(
+                value, st.SUCCESS, source=source, entry_method=meta.get("entry_method") or entry_method
+            )
             # R1.5: precision provenance. yt-dlp values are treated as exact
             # (that's what the extractor claims); manual entries carry
             # whatever their own status_record specifies. No auto-guessing.
@@ -140,14 +149,60 @@ def build_engagement_breakdown(performance: dict | None) -> dict:
     return {"metrics": metrics, "rates": rates}
 
 
+def build_posted_at(value, fields_from_label: str | None = None) -> dict:
+    """v2.2 posting-date record. A calendar date is not an exact timestamp:
+    the record declares its temporal precision (yt-dlp's upload_date is a
+    bare date → date_only) and its timezone (null — platforms don't expose
+    it), so a consumer never mistakes 2026-07-23 for an exact instant."""
+    if value in (None, ""):
+        return st.field_result(None, st.NOT_AVAILABLE, reason="Not present in source metadata")
+    if fields_from_label == "manual":
+        source, entry = st.SOURCE_USER, st.ENTRY_MANUAL
+    else:
+        source, entry = st.SOURCE_YT_DLP, st.ENTRY_AUTOMATIC
+    record = st.field_result(
+        value,
+        st.SUCCESS,
+        source=source,
+        entry_method=entry,
+        precision=ts_util.infer_date_precision(value),
+    )
+    record["timezone"] = None
+    return record
+
+
+def upgrade_posted_at(existing: dict | None, incoming: dict | None) -> dict:
+    """Provenance-preserving posting-date upgrade (the one blessed path for
+    Round 2 enrichment). The incoming record wins only when it is a strictly
+    finer temporal claim (or the existing slot is empty); the superseded
+    record is kept in `provenance` so the original source is never lost."""
+    existing = dict(existing or {})
+    if not isinstance(incoming, dict) or incoming.get("value") in (None, ""):
+        return existing
+    if existing.get("value") in (None, ""):
+        return dict(incoming)
+    incoming_precision = incoming.get("precision") or ts_util.UNKNOWN
+    existing_precision = existing.get("precision") or ts_util.UNKNOWN
+    if not ts_util.is_finer(incoming_precision, existing_precision):
+        return existing
+    upgraded = dict(incoming)
+    superseded = {
+        key: existing.get(key) for key in ("value", "precision", "source", "entry_method")
+    }
+    superseded["recorded_at"] = ts_util.now_utc_iso()
+    upgraded["provenance"] = [*(existing.get("provenance") or []), superseded]
+    return upgraded
+
+
 def build_posting_context(performance: dict | None, source_url: str | None) -> dict:
     """Auto-fills what source metadata provides; everything else is an explicit
     manual_required slot for the enrichment flow."""
     performance = performance or {}
+    fields_from = performance.get("fields_from") or {}
 
     def auto(value):
         if value not in (None, "", []):
-            return st.field_result(value, st.SUCCESS, source=st.SOURCE_AUTO)
+            return st.field_result(value, st.SUCCESS, source=st.SOURCE_YT_DLP, entry_method=st.ENTRY_AUTOMATIC)
         return st.field_result(None, st.NOT_AVAILABLE, reason="Not present in source metadata")
 
     manual = st.field_result(None, st.MANUAL_REQUIRED, reason="Not exposed by platforms; enter manually")
@@ -155,7 +210,7 @@ def build_posting_context(performance: dict | None, source_url: str | None) -> d
         "platform": auto(performance.get("platform") if performance.get("platform") != "manual" else None),
         "account_handle": auto(performance.get("uploader")),
         "account_id": manual,
-        "posted_at": auto(performance.get("upload_date")),
+        "posted_at": build_posted_at(performance.get("upload_date"), fields_from.get("upload_date")),
         "timezone": manual,
         "follower_count_at_posting": manual,
         "account_age": manual,

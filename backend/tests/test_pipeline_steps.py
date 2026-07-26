@@ -379,7 +379,13 @@ def test_fetch_source_step_url_success_merges_manual_override(tmp_path):
     assert perf["fields_from"]["title"] == "manual"
     assert perf["view_count"] == 1000  # auto value, no manual override given
     assert perf["fields_from"]["view_count"] == "auto"
-    assert perf["fields_status"]["view_count"] == {"status": "success", "source": "auto", "precision": "exact"}
+    # v2.2: source is true provenance, separated from how it was entered.
+    assert perf["fields_status"]["view_count"] == {
+        "status": "success",
+        "source": "yt_dlp",
+        "entry_method": "automatic",
+        "precision": "exact",
+    }
     assert perf["platform"] == "youtube"
 
     # original_filename should be updated to the manual title override.
@@ -474,3 +480,47 @@ def test_fetch_source_step_download_failure_fails_job(tmp_path):
             FetchSourceStep().run(ctx)
 
     assert exc_info.value.code == "extractor_outdated"
+
+
+def test_opening_dense_config_recorded_even_when_no_frames_extracted(tmp_path):
+    """R1.7 regression: a zero-length dense window used to early-return
+    BEFORE recording the effective config, leaving the manifest with the
+    raw (possibly null) request values."""
+    from app.pipeline.steps.extract_frames import ExtractFramesStep
+
+    ctx, _, _ = make_ctx(
+        tmp_path,
+        options={"mode": "interval", "interval_ms": 1000, "frame_format": "jpeg", "frame_max_dim": 1280},
+    )
+    # Zero-duration video clamps the dense window to 0 -> no timestamps.
+    ctx.shared["video"] = {"duration_seconds": 0.0, "fps": 25.0, "has_audio": False}
+    ctx.shared["source_relative_path"] = ctx.job_relative("source", "video.mp4")
+
+    def fake_extract(source, output_path, timestamp, **kwargs):
+        with open(output_path, "wb") as f:
+            f.write(b"jpegbytes")
+
+    with patch("app.pipeline.steps.extract_frames.extract_frame_at", side_effect=fake_extract):
+        ExtractFramesStep().run(ctx)
+
+    dense = ctx.shared["opening_dense_config"]
+    assert dense["enabled"] is True
+    assert dense["duration_seconds"] is not None
+    assert dense["interval_seconds"] is not None
+    assert dense["source"] == "default_configuration"
+
+
+def test_job_to_dict_serializes_timezone_aware_timestamps():
+    """SQLite returns naive datetimes; the API layer must still emit
+    offset-explicit ISO strings."""
+    from datetime import datetime
+
+    from app.models import Job
+
+    job = Job(original_filename="a.mp4", stored_source_filename="a.mp4", mode="adaptive")
+    job.created_at = datetime(2026, 7, 26, 12, 0, 0)  # naive, as SQLite returns it
+    job.updated_at = datetime(2026, 7, 26, 12, 0, 1)
+    payload = job.to_dict()
+    assert payload["created_at"] == "2026-07-26T12:00:00+00:00"
+    assert payload["updated_at"] == "2026-07-26T12:00:01+00:00"
+    assert payload["completed_at"] is None

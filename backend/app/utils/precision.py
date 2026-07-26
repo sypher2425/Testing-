@@ -39,3 +39,14 @@ def derived_label(*input_precisions: str) -> str:
     unless every input is `exact`, in which case the result is `exact` too."""
     combined = worst_of(*input_precisions)
     return EXACT if combined == EXACT else f"derived_from_{combined}"
+
+
+def is_valid_precision_label(label) -> bool:
+    """True for the base vocabulary plus the `derived_from_<p>` labels that
+    `derived_label` emits on computed rates."""
+    if not isinstance(label, str):
+        return False
+    if label in ALL_PRECISIONS:
+        return True
+    prefix = "derived_from_"
+    return label.startswith(prefix) and label[len(prefix):] in ALL_PRECISIONS
