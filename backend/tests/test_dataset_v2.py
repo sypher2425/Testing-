@@ -502,3 +502,84 @@ def test_engagement_metrics_carry_provenance_not_auto():
     # Legacy "auto" is mapped forward, never written through.
     assert breakdown["metrics"]["likes"]["source"] == "yt_dlp"
     assert breakdown["metrics"]["likes"]["entry_method"] == "automatic"
+
+
+# ---------- source video excluded from the ZIP ----------
+
+
+def test_zip_excludes_source_video_but_keeps_the_analysis(tmp_path):
+    """The ZIP carries the analysis, not the 60GB source: deflating already-
+    compressed video costs hours for ~0% saving and a second full copy."""
+    from app.pipeline.steps.zip_output import ZipOutputStep
+
+    ctx, logs, _ = make_ctx(tmp_path)
+    ctx.storage.save_bytes(ctx.job_relative("manifest.json"), b"{}")
+    ctx.storage.save_bytes(ctx.job_relative("source", "video.mp4"), b"pretend this is 60GB")
+    ctx.storage.save_bytes(ctx.job_relative("frames", "0000.000.jpg"), b"jpg")
+    ctx.storage.save_bytes(ctx.job_relative("transcript", "transcript.txt"), b"hello")
+
+    ZipOutputStep().run(ctx)
+
+    with zipfile.ZipFile(ctx.storage.get(ctx.job_relative("output.zip"))) as zf:
+        names = set(zf.namelist())
+    assert not any(n.startswith("source/") for n in names)
+    assert {"manifest.json", "frames/0000.000.jpg", "transcript/transcript.txt"} <= names
+    # Exactly one manifest, still at the root.
+    assert [n for n in names if n.endswith("manifest.json")] == ["manifest.json"]
+
+    exclusions = json.loads(ctx.storage.get(ctx.job_relative("metadata", "zip_exclusions.json")).read_bytes())
+    source_exclusion = [e for e in exclusions if e["reason"] == "source_video_excluded_by_configuration"]
+    assert len(source_exclusion) == 1
+    assert source_exclusion[0]["path"] == "source/video.mp4"
+    assert source_exclusion[0]["still_available_at"].endswith("/video")
+    # The file itself is untouched on disk.
+    assert ctx.storage.exists(ctx.job_relative("source", "video.mp4"))
+
+
+def test_zip_includes_source_when_explicitly_enabled(tmp_path, monkeypatch):
+    from app.config import get_settings
+    from app.pipeline.steps.zip_output import ZipOutputStep
+
+    monkeypatch.setenv("ZIP_INCLUDE_SOURCE_VIDEO", "true")
+    get_settings.cache_clear()
+    try:
+        ctx, _, _ = make_ctx(tmp_path)
+        ctx.storage.save_bytes(ctx.job_relative("manifest.json"), b"{}")
+        ctx.storage.save_bytes(ctx.job_relative("source", "video.mp4"), b"vid")
+        ZipOutputStep().run(ctx)
+        with zipfile.ZipFile(ctx.storage.get(ctx.job_relative("output.zip"))) as zf:
+            assert "source/video.mp4" in set(zf.namelist())
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+
+
+def test_manifest_marks_source_as_excluded_from_zip(tmp_path):
+    from app.pipeline.steps.generate_metadata import GenerateMetadataStep
+
+    ctx, _, _ = make_ctx(tmp_path, options={})
+    ctx.shared.update(
+        {
+            "mode": "adaptive",
+            "original_filename": "clip.mp4",
+            "stored_source_filename": "video.mp4",
+            "source_relative_path": ctx.job_relative("source", "video.mp4"),
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "frame_count": 0,
+            "frame_counts_by_category": {"adaptive": 0, "opening_dense": 0, "key_events": 0},
+            "video": {"duration_seconds": 5.0, "has_audio": False},
+            "transcript": {"language": None, "skipped": True, "skipped_reason": "no_audio_track"},
+            "frames": [],
+        }
+    )
+    ctx.storage.save_bytes(ctx.job_relative("source", "video.mp4"), b"vid")
+    ctx.storage.save_bytes(ctx.job_relative("transcript", "transcript.json"), b"{}")
+
+    GenerateMetadataStep().run(ctx)
+
+    manifest = json.loads(ctx.storage.get(ctx.job_relative("manifest.json")).read_bytes())
+    source_entry = [f for f in manifest["files"] if f["path"].startswith("source/")][0]
+    assert source_entry["included_in_zip"] is False
+    assert "/video" in source_entry["reason"]
+    # The manifest still describes the file, size and all.
+    assert source_entry["size_bytes"] == 3

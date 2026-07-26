@@ -9,6 +9,7 @@ import zipfile
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+from anyio import to_thread
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import ValidationError
@@ -18,7 +19,13 @@ from starlette.background import BackgroundTask
 
 from app.api.deps import db_session
 from app.config import Settings, get_settings
-from app.errors import AppError, bad_request, insufficient_storage, not_found, unprocessable
+from app.errors import (
+    bad_request,
+    insufficient_storage,
+    not_found,
+    payload_too_large,
+    unprocessable,
+)
 from app.models import TERMINAL_STATES, Job, JobLog
 from app.schemas import (
     CreateJobOptions,
@@ -38,7 +45,6 @@ from app.utils.manifest_compat import normalize_frames
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 ALLOWED_EXTENSIONS = {"mp4", "mov", "mkv", "webm", "avi"}
-CHUNK_SIZE = 1024 * 1024
 
 _CONTENT_TYPES = {
     "jpg": "image/jpeg",
@@ -115,6 +121,231 @@ def _build_performance_overrides(
     }
 
 
+def _parse_options(**kwargs) -> CreateJobOptions:
+    try:
+        return CreateJobOptions(**kwargs)
+    except ValidationError as exc:
+        raise unprocessable("Invalid job options", json.loads(exc.json())) from exc
+
+
+def _parse_events(events: str | None) -> list:
+    if not events:
+        return []
+    try:
+        parsed = json.loads(events)
+        if not isinstance(parsed, list):
+            raise ValueError("events must be a JSON array")
+    except ValueError as exc:
+        raise unprocessable(f"Invalid events JSON: {exc}") from exc
+    return parsed
+
+
+def _validated_extension(filename: str) -> str:
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise unprocessable(
+            f"Unsupported file extension '.{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+        )
+    return ext
+
+
+def _persist_video_job(
+    db: Session,
+    *,
+    job_id: str,
+    original_filename: str,
+    stored_source_filename: str,
+    mode: str,
+    options_dict: dict,
+    total_bytes: int,
+    source_sha256: str,
+) -> None:
+    """Creates the job row (warning about a byte-identical earlier job) and
+    queues it. Shared by the multipart and streaming upload routes so
+    duplicate detection and enqueueing live in exactly one place."""
+    duplicate = (
+        db.query(Job).filter(Job.source_sha256 == source_sha256).order_by(Job.created_at.desc()).first()
+    )
+    job = Job(
+        id=job_id,
+        original_filename=original_filename,
+        stored_source_filename=stored_source_filename,
+        status="queued",
+        current_step="queued",
+        mode=mode,
+        options=options_dict,
+        file_size_bytes=total_bytes,
+        source_sha256=source_sha256,
+        step_progress={},
+        last_heartbeat=datetime.now(timezone.utc),
+    )
+    db.add(job)
+    if duplicate is not None:
+        db.add(
+            JobLog(
+                job_id=job_id,
+                level="warning",
+                message=(
+                    f"This source video is byte-identical to job {duplicate.id} "
+                    f"({duplicate.original_filename!r}) — you may be processing the same dataset twice."
+                ),
+            )
+        )
+    db.commit()
+
+    from app.tasks import process_job
+
+    process_job.delay(job_id)
+
+
+async def _validate_uploaded_video(dest_path, storage: StorageBackend, job_id: str, settings: Settings) -> None:
+    """ffprobe the stored file, cleaning up the job dir if it isn't a video.
+    Run in a worker thread: ffprobe is a blocking subprocess and a large file
+    on a slow volume would otherwise stall the event loop (and the container
+    healthcheck) for the duration."""
+    try:
+        await to_thread.run_sync(
+            lambda: ffprobe(str(dest_path), timeout=settings.FFPROBE_TIMEOUT_SECONDS)
+        )
+    except FFmpegError as exc:
+        storage.delete(job_id)
+        raise unprocessable(
+            "File failed video validation (ffprobe could not read it). "
+            "It may be corrupt or not a real video file despite its extension.",
+            exc.to_detail(),
+        ) from exc
+
+
+@router.post("/upload", status_code=202, response_model=CreateJobResponse)
+async def create_job_from_stream(
+    request: Request,
+    filename: str = Query(..., description="Original filename; supplies the extension and display name"),
+    mode: str = Query("adaptive"),
+    interval_ms: int = Query(1000),
+    target_frames: int = Query(80),
+    frame_format: str = Query("jpeg"),
+    frame_max_dim: int = Query(1280),
+    opening_dense_enabled: bool = Query(True),
+    opening_dense_duration: float | None = Query(None),
+    opening_dense_interval: float | None = Query(None),
+    events: str | None = Query(None),
+    manual_title: str | None = Query(None),
+    manual_description: str | None = Query(None),
+    manual_uploader: str | None = Query(None),
+    manual_upload_date: str | None = Query(None),
+    manual_view_count: int | None = Query(None),
+    manual_like_count: int | None = Query(None),
+    manual_comment_count: int | None = Query(None),
+    manual_share_count: int | None = Query(None),
+    manual_hashtags: str | None = Query(None),
+    db: Session = Depends(db_session),
+    settings: Settings = Depends(get_settings),
+    storage: StorageBackend = Depends(get_storage),
+) -> CreateJobResponse:
+    """Streaming upload for large videos: the raw request body is written
+    straight to /data in chunks.
+
+    The multipart route (POST /api/jobs) is fine for small files, but Starlette
+    buffers each multipart part to a temp file before the handler runs — so a
+    60GB upload would need a second full copy on the container's own
+    filesystem, which the disk guard cannot even see. Here nothing is buffered:
+    body -> disk, hashing as we go.
+    """
+    options = _parse_options(
+        mode=mode,
+        interval_ms=interval_ms,
+        target_frames=target_frames,
+        frame_format=frame_format,
+        frame_max_dim=frame_max_dim,
+        opening_dense_enabled=opening_dense_enabled,
+        opening_dense_duration=opening_dense_duration,
+        opening_dense_interval=opening_dense_interval,
+    )
+    parsed_events = _parse_events(events)
+    if not filename.strip():
+        raise bad_request("A filename query parameter is required")
+    ext = _validated_extension(filename)
+
+    options_dict = options.model_dump(mode="json")
+    options_dict["performance_overrides"] = _build_performance_overrides(
+        manual_title,
+        manual_description,
+        manual_uploader,
+        manual_upload_date,
+        manual_view_count,
+        manual_like_count,
+        manual_comment_count,
+        manual_share_count,
+        manual_hashtags,
+    )
+    options_dict["events"] = parsed_events
+
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    raw_length = request.headers.get("content-length")
+    declared_bytes = int(raw_length) if raw_length and raw_length.isdigit() else None
+
+    # Reject before reading a single byte when the client tells us the size.
+    # Discovering the limit after transferring 60GB is useless to everyone.
+    if declared_bytes is not None and declared_bytes > max_bytes:
+        raise payload_too_large(
+            f"Upload is {declared_bytes / (1024 * 1024):.0f}MB, which exceeds "
+            f"MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB}MB)."
+        )
+
+    incoming_mb = (declared_bytes / (1024 * 1024)) if declared_bytes else 0.0
+    try:
+        ensure_enough_disk(str(settings.data_path), incoming_mb=incoming_mb)
+    except ValueError as exc:
+        raise insufficient_storage(str(exc)) from exc
+
+    job_id = str(uuid.uuid4())
+    stored_source_filename = f"video.{ext}"
+    dest_path = storage.get(f"{job_id}/source/{stored_source_filename}")
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    hasher = hashlib.sha256()
+    total_bytes = 0
+
+    def write_chunk(out, chunk: bytes) -> None:
+        hasher.update(chunk)
+        out.write(chunk)
+
+    try:
+        with open(dest_path, "wb") as out:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    raise payload_too_large(
+                        f"Upload exceeds MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB}MB)"
+                    )
+                await to_thread.run_sync(write_chunk, out, chunk)
+    except BaseException:
+        # Covers AppError, OSError/ENOSPC, and a client disconnecting
+        # mid-upload — any of which would otherwise strand a partial file.
+        storage.delete(job_id)
+        raise
+
+    if total_bytes == 0:
+        storage.delete(job_id)
+        raise bad_request("Uploaded file is empty")
+
+    await _validate_uploaded_video(dest_path, storage, job_id, settings)
+
+    _persist_video_job(
+        db,
+        job_id=job_id,
+        original_filename=sanitize_filename(filename),
+        stored_source_filename=stored_source_filename,
+        mode=options.mode.value,
+        options_dict=options_dict,
+        total_bytes=total_bytes,
+        source_sha256=hasher.hexdigest(),
+    )
+    return CreateJobResponse(job_id=job_id)
+
+
 @router.post("", status_code=202, response_model=CreateJobResponse)
 async def create_job(
     request: Request,
@@ -142,28 +373,17 @@ async def create_job(
     settings: Settings = Depends(get_settings),
     storage: StorageBackend = Depends(get_storage),
 ) -> CreateJobResponse:
-    try:
-        options = CreateJobOptions(
-            mode=mode,
-            interval_ms=interval_ms,
-            target_frames=target_frames,
-            frame_format=frame_format,
-            frame_max_dim=frame_max_dim,
-            opening_dense_enabled=opening_dense_enabled,
-            opening_dense_duration=opening_dense_duration,
-            opening_dense_interval=opening_dense_interval,
-        )
-    except ValidationError as exc:
-        raise unprocessable("Invalid job options", json.loads(exc.json())) from exc
-
-    parsed_events: list = []
-    if events:
-        try:
-            parsed_events = json.loads(events)
-            if not isinstance(parsed_events, list):
-                raise ValueError("events must be a JSON array")
-        except ValueError as exc:
-            raise unprocessable(f"Invalid events JSON: {exc}") from exc
+    options = _parse_options(
+        mode=mode,
+        interval_ms=interval_ms,
+        target_frames=target_frames,
+        frame_format=frame_format,
+        frame_max_dim=frame_max_dim,
+        opening_dense_enabled=opening_dense_enabled,
+        opening_dense_duration=opening_dense_duration,
+        opening_dense_interval=opening_dense_interval,
+    )
+    parsed_events = _parse_events(events)
 
     has_file = file is not None and bool(file.filename)
     has_url = bool(url and url.strip())
@@ -213,98 +433,76 @@ async def create_job(
         db.add(job)
         db.commit()
 
-    else:
-        assert file is not None and file.filename
-        ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-        if ext not in ALLOWED_EXTENSIONS:
-            raise unprocessable(
-                f"Unsupported file extension '.{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
-            )
+        from app.tasks import process_job
 
-        content_length = request.headers.get("content-length")
-        incoming_mb = (int(content_length) / (1024 * 1024)) if content_length else 0.0
-        try:
-            ensure_enough_disk(str(settings.data_path), incoming_mb=incoming_mb)
-        except ValueError as exc:
-            raise insufficient_storage(str(exc)) from exc
+        process_job.delay(job_id)
+        return CreateJobResponse(job_id=job_id)
 
-        stored_source_filename = f"video.{ext}"
-        relative_source_path = f"{job_id}/source/{stored_source_filename}"
-        dest_path = storage.get(relative_source_path)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
+    assert file is not None and file.filename
+    ext = _validated_extension(file.filename)
 
-        max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
-        total_bytes = 0
-        hasher = hashlib.sha256()
-        try:
-            with open(dest_path, "wb") as out:
-                while True:
-                    chunk = await file.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    total_bytes += len(chunk)
-                    if total_bytes > max_bytes:
-                        raise unprocessable(
-                            f"Upload exceeds MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB}MB)"
-                        )
-                    hasher.update(chunk)
-                    out.write(chunk)
-        except AppError:
-            storage.delete(job_id)
-            raise
-        finally:
-            await file.close()
-
-        if total_bytes == 0:
-            storage.delete(job_id)
-            raise bad_request("Uploaded file is empty")
-
-        try:
-            ffprobe(str(dest_path), timeout=30)
-        except FFmpegError as exc:
-            storage.delete(job_id)
-            raise unprocessable(
-                "File failed video validation (ffprobe could not read it). "
-                "It may be corrupt or not a real video file despite its extension.",
-                exc.to_detail(),
-            ) from exc
-
-        source_sha256 = hasher.hexdigest()
-        duplicate = (
-            db.query(Job).filter(Job.source_sha256 == source_sha256).order_by(Job.created_at.desc()).first()
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    raw_length = request.headers.get("content-length")
+    declared_bytes = int(raw_length) if raw_length and raw_length.isdigit() else None
+    if declared_bytes is not None and declared_bytes > max_bytes:
+        raise payload_too_large(
+            f"Upload is {declared_bytes / (1024 * 1024):.0f}MB, which exceeds "
+            f"MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB}MB)."
         )
 
-        job = Job(
-            id=job_id,
-            original_filename=sanitize_filename(file.filename),
-            stored_source_filename=stored_source_filename,
-            status="queued",
-            current_step="queued",
-            mode=options.mode.value,
-            options=options_dict,
-            file_size_bytes=total_bytes,
-            source_sha256=source_sha256,
-            step_progress={},
-            last_heartbeat=datetime.now(timezone.utc),
-        )
-        db.add(job)
-        if duplicate is not None:
-            db.add(
-                JobLog(
-                    job_id=job_id,
-                    level="warning",
-                    message=(
-                        f"This source video is byte-identical to job {duplicate.id} "
-                        f"({duplicate.original_filename!r}) — you may be processing the same dataset twice."
-                    ),
-                )
-            )
-        db.commit()
+    incoming_mb = (declared_bytes / (1024 * 1024)) if declared_bytes else 0.0
+    try:
+        ensure_enough_disk(str(settings.data_path), incoming_mb=incoming_mb)
+    except ValueError as exc:
+        raise insufficient_storage(str(exc)) from exc
 
-    from app.tasks import process_job
+    stored_source_filename = f"video.{ext}"
+    dest_path = storage.get(f"{job_id}/source/{stored_source_filename}")
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    process_job.delay(job_id)
+    total_bytes = 0
+    hasher = hashlib.sha256()
 
+    def write_chunk(out, chunk: bytes) -> None:
+        hasher.update(chunk)
+        out.write(chunk)
+
+    try:
+        with open(dest_path, "wb") as out:
+            while True:
+                chunk = await file.read(settings.UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    raise payload_too_large(
+                        f"Upload exceeds MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB}MB)"
+                    )
+                await to_thread.run_sync(write_chunk, out, chunk)
+    except BaseException:
+        # AppError, OSError/ENOSPC, or a client disconnect — all of which
+        # would otherwise leave a partial file behind with no job row.
+        storage.delete(job_id)
+        raise
+    finally:
+        await file.close()
+
+    if total_bytes == 0:
+        storage.delete(job_id)
+        raise bad_request("Uploaded file is empty")
+
+    await _validate_uploaded_video(dest_path, storage, job_id, settings)
+
+    _persist_video_job(
+        db,
+        job_id=job_id,
+        original_filename=sanitize_filename(file.filename),
+        stored_source_filename=stored_source_filename,
+        mode=options.mode.value,
+        options_dict=options_dict,
+        total_bytes=total_bytes,
+        source_sha256=hasher.hexdigest(),
+    )
     return CreateJobResponse(job_id=job_id)
 
 

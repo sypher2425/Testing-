@@ -59,13 +59,21 @@ class GenerateMetadataStep(PipelineStep):
             if ctx.shared.get("source_url")
             else "Original uploaded video file"
         )
-        files = [
-            {
-                "path": f"source/{ctx.shared['stored_source_filename']}",
-                "description": source_description,
-                "size_bytes": ctx.storage.size_of(ctx.shared["source_relative_path"]),
-            }
-        ]
+        source_entry = {
+            "path": f"source/{ctx.shared['stored_source_filename']}",
+            "description": source_description,
+            "size_bytes": ctx.storage.size_of(ctx.shared["source_relative_path"]),
+        }
+        # The manifest always describes the source video, but by default the
+        # ZIP carries only the analysis — say so explicitly rather than listing
+        # a file the archive doesn't contain.
+        if not settings.ZIP_INCLUDE_SOURCE_VIDEO:
+            source_entry["included_in_zip"] = False
+            source_entry["reason"] = (
+                "Excluded from output.zip by configuration (ZIP_INCLUDE_SOURCE_VIDEO=false); "
+                "download it from /api/jobs/{job_id}/video"
+            )
+        files = [source_entry]
 
         if not transcript.get("skipped"):
             for fname, desc in [

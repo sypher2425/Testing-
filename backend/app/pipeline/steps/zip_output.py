@@ -5,15 +5,23 @@ look like complete datasets of their own (their own manifest.json + source/)
 are excluded from the export — with a warning and a machine-readable
 exclusion record — instead of being silently packaged inside the new dataset.
 Nothing is ever deleted from disk.
+
+The source video is excluded by default (ZIP_INCLUDE_SOURCE_VIDEO=false): the
+ZIP carries the analysis — transcripts, frames, metadata — while the video
+itself stays on disk and downloadable via /api/jobs/{id}/video. Deflating tens
+of GB of already-compressed H.264 costs hours of CPU for ~0% saving and needs
+a second full copy of the file on the same volume.
 """
 import json
 import os
 import zipfile
 from pathlib import Path
 
+from app.config import get_settings
 from app.pipeline.base import PipelineStep
 from app.pipeline.context import PipelineContext
 from app.pipeline.errors import PipelineFailedError
+from app.utils.timeouts import HeartbeatTicker
 
 
 def _find_nested_dataset_roots(job_dir: Path) -> list[Path]:
@@ -41,6 +49,7 @@ class ZipOutputStep(PipelineStep):
 
     def run(self, ctx: PipelineContext) -> None:
         ctx.set_step_progress(self.name, 0)
+        settings = get_settings()
         job_dir = ctx.storage.get(ctx.job_relative(""))
         zip_rel_path = ctx.job_relative("output.zip")
         zip_path = ctx.storage.get(zip_rel_path)
@@ -74,6 +83,22 @@ class ZipOutputStep(PipelineStep):
                         "inside a dataset. It was NOT deleted."
                     )
                     continue
+                if not settings.ZIP_INCLUDE_SOURCE_VIDEO and arcname.replace(os.sep, "/").startswith("source/"):
+                    size_mb = os.path.getsize(full) / (1024 * 1024)
+                    exclusions.append(
+                        {
+                            "path": arcname.replace(os.sep, "/"),
+                            "reason": "source_video_excluded_by_configuration",
+                            "size_bytes": os.path.getsize(full),
+                            "still_available_at": f"/api/jobs/{ctx.job_id}/video",
+                        }
+                    )
+                    ctx.info(
+                        f"Excluding '{arcname}' from the ZIP ({size_mb:.0f}MB): the archive carries the "
+                        "analysis, not the source video. It is still on disk and downloadable from "
+                        "the job's video endpoint. Set ZIP_INCLUDE_SOURCE_VIDEO=true to include it."
+                    )
+                    continue
                 all_files.append((full, arcname))
 
         if exclusions:
@@ -88,15 +113,19 @@ class ZipOutputStep(PipelineStep):
 
         total = len(all_files)
         try:
-            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                seen_arcnames: set[str] = set()
-                for i, (full, arcname) in enumerate(all_files):
-                    ctx.check_cancel()
-                    if arcname in seen_arcnames:
-                        continue
-                    zf.write(full, arcname)
-                    seen_arcnames.add(arcname)
-                    ctx.set_step_progress(self.name, round(100 * (i + 1) / total))
+            # A single large member can take minutes with no progress tick of
+            # its own; the ticker keeps last_heartbeat fresh so the stale-job
+            # reaper doesn't mistake a working zip for a dead worker.
+            with HeartbeatTicker(settings.HEARTBEAT_INTERVAL_SECONDS, ctx.heartbeat):
+                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    seen_arcnames: set[str] = set()
+                    for i, (full, arcname) in enumerate(all_files):
+                        ctx.check_cancel()
+                        if arcname in seen_arcnames:
+                            continue
+                        zf.write(full, arcname)
+                        seen_arcnames.add(arcname)
+                        ctx.set_step_progress(self.name, round(100 * (i + 1) / total))
         except OSError as exc:
             raise PipelineFailedError("zip_failed", f"Failed to build output.zip: {exc}") from exc
 

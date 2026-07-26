@@ -9,6 +9,10 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+# Inlined into the client bundle at build time, so it must be a build arg —
+# setting it only at runtime would not reach the browser.
+ARG NEXT_PUBLIC_MAX_UPLOAD_MB=61440
+ENV NEXT_PUBLIC_MAX_UPLOAD_MB=$NEXT_PUBLIC_MAX_UPLOAD_MB
 RUN npm run build
 
 FROM node:20-slim AS runner

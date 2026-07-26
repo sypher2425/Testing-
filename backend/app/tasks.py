@@ -65,13 +65,36 @@ def reap_stale_jobs() -> int:
     """Mark jobs as failed if their worker died without updating heartbeat,
     so nothing is ever stuck 'processing forever' after a worker crash/restart."""
     settings = get_settings()
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=settings.STALE_JOB_TIMEOUT_MINUTES)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=settings.STALE_JOB_TIMEOUT_MINUTES)
+    queued_cutoff = now - timedelta(hours=settings.QUEUED_JOB_TIMEOUT_HOURS)
 
     db = get_session()
     reaped = 0
     try:
         jobs = db.query(Job).filter(~Job.status.in_(TERMINAL_STATES)).all()
         for job in jobs:
+            waiting_in_queue = job.status == "queued" and job.started_at is None
+            if waiting_in_queue:
+                # Not stalled — just waiting. With TRANSCRIPTION_CONCURRENCY=1
+                # a large source ahead of it can hold the queue for hours, so
+                # the short stall timeout must not apply. The long timeout
+                # still catches a job that never reached the broker at all.
+                reference = job.created_at
+                if not reference or reference.replace(tzinfo=timezone.utc) >= queued_cutoff:
+                    continue
+                job.status = "failed"
+                job.error_code = "never_started"
+                job.error_message = (
+                    f"Job was still queued after {settings.QUEUED_JOB_TIMEOUT_HOURS}h and never "
+                    "started. The task queue may not have received it (is the worker running?). "
+                    "Please submit it again."
+                )
+                job.completed_at = now
+                db.commit()
+                reaped += 1
+                continue
+
             reference = job.last_heartbeat or job.started_at or job.created_at
             if reference and reference.replace(tzinfo=timezone.utc) < cutoff:
                 job.status = "failed"
@@ -80,7 +103,7 @@ def reap_stale_jobs() -> int:
                     "Processing stalled (worker likely crashed or restarted) and was "
                     "automatically marked as failed. Please re-upload to try again."
                 )
-                job.completed_at = datetime.now(timezone.utc)
+                job.completed_at = now
                 db.commit()
                 reaped += 1
     finally:

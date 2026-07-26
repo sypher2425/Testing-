@@ -336,7 +336,8 @@ All responses are JSON. Errors use a consistent envelope:
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/jobs` | Multipart: either `file` or `url` (exactly one), plus options (`mode`, `interval_ms`, `target_frames`, `frame_format`, `frame_max_dim`) and optional `manual_*` performance overrides. Returns `{ job_id }` (202) immediately. |
+| POST | `/api/jobs/upload` | **Streaming upload for files (any size).** Raw file bytes as the request body; options as query params (`filename` required, plus `mode`, `interval_ms`, `target_frames`, `frame_format`, `frame_max_dim`, `manual_*`). Written straight to disk in chunks — nothing buffered. Returns `{ job_id }` (202). 413 if over `MAX_UPLOAD_MB`, 507 if disk is short. |
+| POST | `/api/jobs` | Multipart: either `file` or `url` (exactly one), plus options (`mode`, `interval_ms`, `target_frames`, `frame_format`, `frame_max_dim`) and optional `manual_*` performance overrides. Returns `{ job_id }` (202) immediately. Use this for URL ingestion; prefer `/api/jobs/upload` for files. |
 | GET | `/api/jobs` | Paginated recent jobs |
 | GET | `/api/jobs/{id}` | Full job status + per-step progress + error detail |
 | GET | `/api/jobs/{id}/events` | SSE progress stream |
@@ -469,8 +470,11 @@ See `.env.example` for the full annotated list. Highlights:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `MAX_UPLOAD_MB` | 2048 | Upload size cap; enforced during the streamed write, not after buffering the whole file |
-| `MIN_FREE_DISK_MB` | 2048 | Uploads are rejected up front if free disk would drop below this after accepting the file |
+| `MAX_UPLOAD_MB` | 61440 (60GB) | Upload size cap. Rejected with 413 from `Content-Length` before any bytes transfer, and again mid-stream for chunked bodies |
+| `MIN_FREE_DISK_MB` | 2048 | Safety margin kept free; uploads are rejected up front (507) if accepting the file would eat into it |
+| `UPLOAD_DISK_HEADROOM_MULTIPLIER` | 1.5 | Disk required = upload size x this + the margin, covering extracted frames, temp audio, and the ZIP |
+| `UPLOAD_CHUNK_BYTES` | 8388608 (8MiB) | Streaming write size |
+| `ZIP_INCLUDE_SOURCE_VIDEO` | false | Whether `output.zip` contains the source video — see [Large uploads](#large-uploads) |
 | `WHISPER_MODEL_SIZE` | small | faster-whisper model; CPU-only unless `WHISPER_DEVICE=cuda` |
 | `ENABLE_DIARIZATION` | false | See [Diarization](#optional-speaker-diarization) below |
 | `MAX_FRAMES` | 2000 | Hard cap for `every_frame`; soft cap (with a warning) for other modes |
@@ -479,8 +483,49 @@ See `.env.example` for the full annotated list. Highlights:
 | `YTDLP_COMMENT_LIMIT` | 100 | Top comments (by likes) saved per URL-ingested job (`MAX_COMMENTS` accepted as an alias) |
 | `OPENING_DENSE_DURATION` / `OPENING_DENSE_INTERVAL` | 8 / 0.25 | Dense hook-analysis frames: one every INTERVAL seconds for the first DURATION seconds; per-job overridable, disable per job with `opening_dense_enabled=false` |
 | `COOKIES_FILE` | (unset) | In-container path to a cookies.txt for account-gated fetches — use `/run/secrets/cookies.txt` and drop the file at `secrets/cookies.txt` on the host; optional |
-| `STALE_JOB_TIMEOUT_MINUTES` | 30 | A job with no heartbeat update for this long is marked `failed` (worker crash recovery) |
+| `STALE_JOB_TIMEOUT_MINUTES` | 30 | A *running* job with no heartbeat update for this long is marked `failed` (worker crash recovery) |
+| `QUEUED_JOB_TIMEOUT_HOURS` | 24 | A job still *waiting* this long fails as `never_started`. Separate from the above so a job queued behind a huge one isn't killed for waiting |
+| `TASK_SOFT_TIME_LIMIT_SECONDS` / `TASK_HARD_TIME_LIMIT_SECONDS` | 86400 / 86700 | Whole-job ceiling (24h), sized for very large sources |
+| `FFMPEG_TIMEOUT_SECONDS` / `WHISPER_TIMEOUT_SECONDS` | 21600 | Per-step ceilings (6h each) |
 | `CORS_ORIGINS` | http://localhost:3000 | Comma-separated list |
+
+### Large uploads
+
+The default cap is **60GB**. Two things make that workable:
+
+**Files stream straight to disk.** `POST /api/jobs/upload` takes the raw file as
+the request body with options in the query string, and writes it to `/data` in
+8MiB chunks while hashing as it goes — nothing is buffered. The multipart route
+(`POST /api/jobs`) still exists for URL jobs and small files, but Starlette
+buffers each multipart part to a temp file *before* the handler runs, so a
+60GB multipart upload would need a second full copy on the container's own
+filesystem — which the disk guard cannot even see. The frontend automatically
+uses the streaming route for file uploads.
+
+Oversized uploads are rejected in **413 before a single byte transfers** when the
+client sends a `Content-Length` (browsers do), so nobody waits out a 60GB
+transfer to learn the file was too big.
+
+**`output.zip` excludes the source video.** The archive carries the analysis —
+transcripts, frames, metadata, manifest — while the video itself stays on disk
+and is downloadable from `/api/jobs/{id}/video` (which supports Range
+requests). Zipping the source would deflate tens of GB of already-compressed
+H.264 for ~0% saving, costing hours of CPU and a second full copy on the same
+volume. The manifest still describes the source file and marks it
+`"included_in_zip": false` with the reason, and `metadata/zip_exclusions.json`
+records it. Set `ZIP_INCLUDE_SOURCE_VIDEO=true` to restore the old behavior.
+
+**Disk sizing is the real constraint.** Budget roughly **1.5x the video size**
+(`UPLOAD_DISK_HEADROOM_MULTIPLIER`) plus `MIN_FREE_DISK_MB`: a 60GB upload needs
+~92GB free. On Docker Desktop that means the VM's virtual disk, not just the
+host drive — raise it in Settings → Resources if needed. The guard rejects with
+a 507 explaining the arithmetic rather than failing partway with `ENOSPC`.
+
+**Processing time.** A 60GB source is many hours of CPU at
+`WHISPER_MODEL_SIZE=small` with `TRANSCRIPTION_CONCURRENCY=1`, so the job
+ceiling is 24h and scene detection, transcription, and zipping all send
+heartbeats to keep the stale-job reaper from failing healthy work. Uploads have
+no resume: a dropped connection means starting over.
 
 ### Optional speaker diarization
 

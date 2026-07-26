@@ -14,6 +14,7 @@ from app.pipeline.context import PipelineContext
 from app.pipeline.errors import PipelineFailedError
 from app.utils.ffmpeg import FFmpegError, extract_frame_at
 from app.utils.filenames import frame_filename
+from app.utils.timeouts import HeartbeatTicker
 
 
 @dataclass
@@ -27,11 +28,16 @@ def _detect_scenes(source_path: str, ctx: PipelineContext) -> list[tuple[float, 
     from scenedetect import SceneManager, StatsManager, open_video
     from scenedetect.detectors import ContentDetector
 
+    settings = get_settings()
     video = open_video(source_path)
     stats_manager = StatsManager()
     scene_manager = SceneManager(stats_manager)
     scene_manager.add_detector(ContentDetector())
-    scene_manager.detect_scenes(video, show_progress=False)
+    # Detection decodes the whole video with no progress reporting of its own —
+    # on a large source that is far longer than STALE_JOB_TIMEOUT_MINUTES, so
+    # keep last_heartbeat fresh or the reaper fails a healthy job.
+    with HeartbeatTicker(settings.HEARTBEAT_INTERVAL_SECONDS, ctx.heartbeat):
+        scene_manager.detect_scenes(video, show_progress=False)
     scene_list = scene_manager.get_scene_list()
 
     scenes = []

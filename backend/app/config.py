@@ -16,8 +16,23 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:////data/db/app.db"
 
     # Uploads
-    MAX_UPLOAD_MB: int = 2048
+    # 60GB. Large files must use the streaming endpoint (POST /api/jobs/upload):
+    # the multipart route buffers the whole body to the container's temp dir
+    # first, which needs a second full copy of the file on a filesystem the
+    # disk guard cannot see.
+    MAX_UPLOAD_MB: int = 61440
     MIN_FREE_DISK_MB: int = 2048
+    # Streaming write size. Bigger chunks mean fewer threadpool round-trips
+    # over a very long upload.
+    UPLOAD_CHUNK_BYTES: int = 8 * 1024 * 1024
+    # A source video costs more disk than its own size: extracted frames, the
+    # temp audio.wav (~32kB per second of video), and output.zip all land on
+    # the same volume. The source video itself is no longer zipped, so this
+    # multiplier covers the derived artifacts rather than a second full copy.
+    UPLOAD_DISK_HEADROOM_MULTIPLIER: float = 1.5
+    # ffprobe on the uploaded file, before the job is queued. Reads headers
+    # only, but a huge file on a slow volume deserves more than 30s.
+    FFPROBE_TIMEOUT_SECONDS: int = 120
 
     # Celery / Redis
     REDIS_URL: str = "redis://redis:6379/0"
@@ -64,9 +79,17 @@ class Settings(BaseSettings):
     # Job lifecycle
     RETENTION_HOURS: int = 72
     STALE_JOB_TIMEOUT_MINUTES: int = 30
-    FFMPEG_TIMEOUT_SECONDS: int = 3600
+    # Separate, much longer bound for jobs still WAITING in the queue. With
+    # concurrency 1 a large source can legitimately hold the queue for hours,
+    # so the 30-minute stall timeout must not apply — but a job whose enqueue
+    # never reached the broker (e.g. Redis down at submit time) would
+    # otherwise sit queued forever, so it still fails eventually.
+    QUEUED_JOB_TIMEOUT_HOURS: int = 24
+    # 6h. Sized for very large sources: decoding a 60GB video for scene
+    # detection or frame extraction is hours of work, not minutes.
+    FFMPEG_TIMEOUT_SECONDS: int = 21600
     # Bounds the transcription loop itself (actually enforced as of R1.6).
-    WHISPER_TIMEOUT_SECONDS: int = 3600
+    WHISPER_TIMEOUT_SECONDS: int = 21600
     # Bounds model load + first-run download separately: a slow 460MB
     # download is a different failure from a wedged transcription.
     WHISPER_MODEL_LOAD_TIMEOUT_SECONDS: int = 1800
@@ -74,9 +97,11 @@ class Settings(BaseSettings):
     HEARTBEAT_INTERVAL_SECONDS: int = 10
     # Celery's own backstop: soft limit raises inside the task, hard limit
     # kills the child. Sized above the per-step limits so the typed
-    # per-step errors win in normal operation.
-    TASK_SOFT_TIME_LIMIT_SECONDS: int = 7200
-    TASK_HARD_TIME_LIMIT_SECONDS: int = 7500
+    # per-step errors win in normal operation. 24h accommodates a 60GB
+    # source; the heartbeat reaper (STALE_JOB_TIMEOUT_MINUTES) is what
+    # actually catches a wedged job, not this ceiling.
+    TASK_SOFT_TIME_LIMIT_SECONDS: int = 86400
+    TASK_HARD_TIME_LIMIT_SECONDS: int = 86700
     # What to do with jobs found mid-flight after a worker restart:
     # "requeue" (re-run from the top if the source still exists) or "fail".
     STARTUP_RECOVERY_MODE: str = "requeue"
@@ -103,6 +128,12 @@ class Settings(BaseSettings):
     # Research mode (topic search -> transcript bundle; never downloads video)
     RESEARCH_MAX_RESULTS: int = 25
     RESEARCH_SUB_LANGS: str = "en.*"
+
+    # ZIP output. The source video is excluded by default: it is already on
+    # disk (and downloadable via /api/jobs/{id}/video), and deflating tens of
+    # GB of already-compressed H.264 costs hours of CPU for ~0% saving plus a
+    # second full copy of the file on the same volume.
+    ZIP_INCLUDE_SOURCE_VIDEO: bool = False
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"

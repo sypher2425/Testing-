@@ -3,7 +3,7 @@ same schema works unchanged against Postgres later."""
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -69,7 +69,9 @@ class Job(Base):
     language: Mapped[str | None] = mapped_column(String(16), nullable=True)
     frame_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # BigInteger: a 60GB upload is ~6.4e10 bytes, well past a 32-bit INTEGER.
+    # (SQLite is dynamically typed and unaffected; this matters on Postgres.)
+    file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -443,3 +443,141 @@ def test_celery_worker_concurrency_uses_the_setting():
 
     assert celery_app.conf.worker_concurrency == get_settings().TRANSCRIPTION_CONCURRENCY
     assert celery_app.conf.task_time_limit == get_settings().TASK_HARD_TIME_LIMIT_SECONDS
+
+
+def test_reaper_leaves_never_started_queued_jobs_alone(db_session):
+    """With concurrency 1 a long job (e.g. a 60GB source) can keep the next
+    job queued for hours. The reaper must not fail work that never started."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import Job
+    from app.tasks import reap_stale_jobs
+
+    long_ago = datetime.now(timezone.utc) - timedelta(hours=6)
+    waiting = Job(
+        original_filename="waiting.mp4",
+        stored_source_filename="video.mp4",
+        mode="adaptive",
+        status="queued",
+        current_step="queued",
+        started_at=None,
+        last_heartbeat=long_ago,
+        created_at=long_ago,
+    )
+    running = Job(
+        original_filename="running.mp4",
+        stored_source_filename="video.mp4",
+        mode="adaptive",
+        status="transcribing",
+        current_step="transcribing",
+        started_at=long_ago,
+        last_heartbeat=long_ago,
+        created_at=long_ago,
+    )
+    db_session.add_all([waiting, running])
+    db_session.commit()
+    waiting_id, running_id = waiting.id, running.id
+
+    reap_stale_jobs()
+
+    db_session.expire_all()
+    assert db_session.get(Job, waiting_id).status == "queued"
+    # A job that actually started and went silent is still reaped.
+    reaped = db_session.get(Job, running_id)
+    assert reaped.status == "failed"
+    assert reaped.error_code == "worker_lost"
+
+
+def test_reaper_eventually_fails_a_job_that_never_reached_the_queue(db_session):
+    """The queued-job exemption must not be a forever pass: if the enqueue
+    never landed (broker down at submit time), the job has to fail somehow."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.config import get_settings
+    from app.models import Job
+    from app.tasks import reap_stale_jobs
+
+    settings = get_settings()
+    ancient = datetime.now(timezone.utc) - timedelta(hours=settings.QUEUED_JOB_TIMEOUT_HOURS + 2)
+    orphan = Job(
+        original_filename="never_ran.mp4",
+        stored_source_filename="video.mp4",
+        mode="adaptive",
+        status="queued",
+        current_step="queued",
+        started_at=None,
+        last_heartbeat=ancient,
+        created_at=ancient,
+    )
+    db_session.add(orphan)
+    db_session.commit()
+    orphan_id = orphan.id
+
+    reap_stale_jobs()
+
+    db_session.expire_all()
+    failed = db_session.get(Job, orphan_id)
+    assert failed.status == "failed"
+    assert failed.error_code == "never_started"
+
+
+def test_zip_step_heartbeats_during_the_archive(tmp_path):
+    """A single huge member yields one progress tick, so the ticker is what
+    keeps last_heartbeat fresh while the zip is being written."""
+    from app.pipeline.steps.zip_output import ZipOutputStep
+    from tests.test_pipeline_steps import make_ctx
+
+    ctx, _, _ = make_ctx(tmp_path)
+    beats: list[int] = []
+    ctx.heartbeat = lambda: beats.append(1)
+    ctx.storage.save_bytes(ctx.job_relative("manifest.json"), b"{}")
+    ctx.storage.save_bytes(ctx.job_relative("frames", "0000.000.jpg"), b"jpg")
+
+    with patch("app.pipeline.steps.zip_output.HeartbeatTicker") as ticker:
+        ZipOutputStep().run(ctx)
+    # The step must install a ticker wired to ctx.heartbeat.
+    assert ticker.call_count == 1
+    assert ticker.call_args.args[1] == ctx.heartbeat
+
+
+def test_scene_detection_heartbeats(tmp_path):
+    """Detection decodes the whole video with no progress of its own — far
+    longer than STALE_JOB_TIMEOUT_MINUTES on a large source."""
+    from app.pipeline.steps import extract_frames as ef
+    from tests.test_pipeline_steps import make_ctx
+
+    ctx, _, _ = make_ctx(tmp_path)
+    beats: list[int] = []
+    ctx.heartbeat = lambda: beats.append(1)
+
+    class FakeSceneManager:
+        def __init__(self, *a, **k):
+            pass
+
+        def add_detector(self, detector):
+            pass
+
+        def detect_scenes(self, video, show_progress=False):
+            pass
+
+        def get_scene_list(self):
+            return []
+
+    fake_scenedetect = type(
+        "M",
+        (),
+        {
+            "SceneManager": FakeSceneManager,
+            "StatsManager": lambda *a, **k: None,
+            "open_video": lambda path: object(),
+        },
+    )
+    fake_detectors = type("D", (), {"ContentDetector": lambda *a, **k: None})
+
+    with patch.dict(
+        "sys.modules",
+        {"scenedetect": fake_scenedetect, "scenedetect.detectors": fake_detectors},
+    ), patch.object(ef, "HeartbeatTicker") as ticker:
+        ef._detect_scenes("/tmp/whatever.mp4", ctx)
+    assert ticker.call_count == 1
+    assert ticker.call_args.args[1] == ctx.heartbeat

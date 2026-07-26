@@ -47,35 +47,75 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Upload cap the API enforces, mirrored client-side so a huge file is
+ * rejected before any bytes leave the machine. */
+export const MAX_UPLOAD_MB = Number(process.env.NEXT_PUBLIC_MAX_UPLOAD_MB ?? 61440);
+
+export function formatFileSize(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1024) return `${(mb / 1024).toFixed(2)} GB`;
+  return `${mb.toFixed(1)} MB`;
+}
+
 export async function createJob(
   source: JobSource,
   options: CreateJobOptions,
   manualOverrides?: ManualPerformanceOverrides,
   onProgress?: (percent: number) => void
 ): Promise<CreateJobResponse> {
-  const formData = new FormData();
-  if (source.kind === "file") {
-    formData.append("file", source.file);
-  } else {
-    formData.append("url", source.url);
-  }
-  formData.append("mode", options.mode);
-  formData.append("interval_ms", String(options.interval_ms));
-  formData.append("target_frames", String(options.target_frames));
-  formData.append("frame_format", options.frame_format);
-  formData.append("frame_max_dim", String(options.frame_max_dim));
-  if (manualOverrides) {
-    for (const [key, value] of Object.entries(manualOverrides)) {
-      if (value !== undefined && value !== null && value !== "") {
-        formData.append(`manual_${key}`, String(value));
+  // Files go to the streaming endpoint (raw body, options in the query
+  // string) so the API can write them straight to disk — multipart would
+  // buffer the whole thing to a temp file first, which doesn't scale to
+  // tens of GB. URL jobs keep using the multipart route.
+  const isFile = source.kind === "file";
+  let target: string;
+  let body: XMLHttpRequestBodyInit;
+
+  if (isFile) {
+    const params = new URLSearchParams({
+      filename: source.file.name,
+      mode: options.mode,
+      interval_ms: String(options.interval_ms),
+      target_frames: String(options.target_frames),
+      frame_format: options.frame_format,
+      frame_max_dim: String(options.frame_max_dim),
+    });
+    if (manualOverrides) {
+      for (const [key, value] of Object.entries(manualOverrides)) {
+        if (value !== undefined && value !== null && value !== "") {
+          params.set(`manual_${key}`, String(value));
+        }
       }
     }
+    target = `${API_BASE_URL}/api/jobs/upload?${params.toString()}`;
+    body = source.file;
+  } else {
+    const formData = new FormData();
+    formData.append("url", source.url);
+    formData.append("mode", options.mode);
+    formData.append("interval_ms", String(options.interval_ms));
+    formData.append("target_frames", String(options.target_frames));
+    formData.append("frame_format", options.frame_format);
+    formData.append("frame_max_dim", String(options.frame_max_dim));
+    if (manualOverrides) {
+      for (const [key, value] of Object.entries(manualOverrides)) {
+        if (value !== undefined && value !== null && value !== "") {
+          formData.append(`manual_${key}`, String(value));
+        }
+      }
+    }
+    target = `${API_BASE_URL}/api/jobs`;
+    body = formData;
   }
 
   return new Promise<CreateJobResponse>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${API_BASE_URL}/api/jobs`);
+    xhr.open("POST", target);
     xhr.responseType = "json";
+    if (isFile) {
+      // Opaque binary body — let the server treat it as raw bytes.
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    }
 
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && onProgress) {
@@ -101,7 +141,7 @@ export async function createJob(
     };
 
     xhr.onerror = () => reject(new ApiError(0, "network_error", "Network error during upload"));
-    xhr.send(formData);
+    xhr.send(body);
   });
 }
 
