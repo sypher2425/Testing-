@@ -12,6 +12,10 @@ faster-whisper==1.0.2
 # anymore (huggingface-hub moved to httpx internally) — pin it explicitly.
 requests==2.32.3
 scenedetect[opencv]==0.6.4
+# Storyboard/contact-sheet composition. OpenCV (already present via scenedetect)
+# can only draw Hershey vector text — no TrueType, no wrapping — which is
+# unreadable for frame captions, so Pillow does the compositing.
+Pillow==10.4.0
 yt-dlp==2026.7.4
 python-json-logger==2.0.7
 aiofiles==23.2.1

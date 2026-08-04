@@ -1,12 +1,16 @@
 FROM python:3.11-slim
 
 # ffmpeg for probing/transcoding/frame extraction; libgl1 for opencv (used by
-# PySceneDetect's content detector); curl for the Docker healthcheck.
+# PySceneDetect's content detector); curl for the Docker healthcheck;
+# fonts-dejavu-core for storyboard captions — python:3.11-slim ships no fonts
+# at all, and --no-install-recommends stops ffmpeg from pulling any in, so
+# without this Pillow falls back to a tiny unreadable bitmap font.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libgl1 \
     libglib2.0-0 \
     curl \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
