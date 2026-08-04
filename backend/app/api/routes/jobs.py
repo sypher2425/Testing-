@@ -790,10 +790,72 @@ def get_frame_in_subdir(
     return Response(content=data, media_type=_content_type_for(filename))
 
 
+@router.get("/{job_id}/storyboards")
+def list_storyboards(
+    job_id: str,
+    db: Session = Depends(db_session),
+    storage: StorageBackend = Depends(get_storage),
+) -> Response:
+    """The storyboard manifest: every sheet plus the tile→source-frame map.
+
+    Returns an empty-but-valid manifest rather than a 404 when the job has no
+    storyboards, so the UI can render an explanatory empty state.
+    """
+    _get_job_or_404(db, job_id)
+    rel = f"{job_id}/storyboard_manifest.json"
+    if not storage.exists(rel):
+        return Response(
+            content=json.dumps({"status": "not_available", "storyboards": [], "types_built": []}),
+            media_type="application/json",
+        )
+    return Response(content=storage.get(rel).read_bytes(), media_type="application/json")
+
+
+@router.get("/{job_id}/storyboards/{filename}")
+def get_storyboard(
+    job_id: str,
+    filename: str,
+    db: Session = Depends(db_session),
+    storage: StorageBackend = Depends(get_storage),
+) -> Response:
+    _get_job_or_404(db, job_id)
+    if not is_safe_relative_path(filename) or "/" in filename:
+        raise bad_request("Invalid storyboard filename")
+    rel = f"{job_id}/storyboards/{filename}"
+    if not storage.exists(rel):
+        raise not_found(f"Storyboard {filename} not found for job {job_id}")
+    return Response(
+        content=storage.get(rel).read_bytes(), media_type=_content_type_for(filename)
+    )
+
+
+@router.post("/{job_id}/storyboards/regenerate", status_code=202)
+def regenerate_storyboards_route(
+    job_id: str,
+    db: Session = Depends(db_session),
+) -> dict:
+    """Rebuild the sheets from the frames already on disk — no re-extraction,
+    no re-transcription. Useful after changing layout settings, or to retry
+    when storyboard generation failed on a job whose frames are fine."""
+    job = _get_job_or_404(db, job_id)
+    if job.job_type == "research":
+        raise bad_request("Research jobs have no storyboards")
+    if job.status != "completed":
+        raise bad_request(
+            f"Job {job_id} is not completed yet (status={job.status}); storyboards can only be "
+            "regenerated for a finished job."
+        )
+
+    from app.tasks import regenerate_storyboards
+
+    regenerate_storyboards.delay(job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
 @router.get("/{job_id}/download")
 def download(
     job_id: str,
-    asset: str = Query(..., pattern="^(zip|transcript|frames)$"),
+    asset: str = Query(..., pattern="^(zip|transcript|frames|storyboards)$"),
     db: Session = Depends(db_session),
     storage: StorageBackend = Depends(get_storage),
 ) -> Response:
@@ -819,6 +881,14 @@ def download(
 
     if asset == "transcript":
         return _zip_subset(job_id, storage, ["transcript"], f"{job_id}-transcript.zip")
+
+    if asset == "storyboards":
+        return _zip_subset(
+            job_id,
+            storage,
+            ["storyboards", "storyboard_manifest.json"],
+            f"{job_id}-storyboards.zip",
+        )
 
     return _zip_subset(job_id, storage, ["frames", "metadata/frames.json"], f"{job_id}-frames.zip")
 

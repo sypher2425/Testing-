@@ -375,7 +375,9 @@ class GenerateMetadataStep(PipelineStep):
             "processing": {
                 "started_at": ctx.shared.get("started_at"),
                 "manifest_generated_at": manifest_generated_at,
-                "last_rebuilt_at": None,
+                # Set when a completed dataset is rebuilt in place (e.g. by the
+                # storyboard regenerate task) rather than processed fresh.
+                "last_rebuilt_at": ctx.shared.get("rebuilt_at"),
             },
             "extraction_report": ctx.shared.get("stage_reports") or [],
             "identity": identity_block,

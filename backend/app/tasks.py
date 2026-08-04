@@ -10,7 +10,7 @@ from app.celery_app import celery_app
 from app.config import get_settings
 from app.database import get_session
 from app.logging_config import configure_logging
-from app.models import TERMINAL_STATES, Job
+from app.models import TERMINAL_STATES, Job, JobLog
 from app.storage import get_storage
 from app.utils.timeouts import describe_worker_exit, parse_worker_exit
 
@@ -32,6 +32,114 @@ def process_job(self, job_id: str) -> None:
         db.close()
 
     run_pipeline(job_id)
+
+
+@celery_app.task(name="app.tasks.regenerate_storyboards")
+def regenerate_storyboards(job_id: str) -> dict:
+    """Rebuild storyboards for a finished job without touching the video.
+
+    Frames, transcript and probe data are already on disk, so this reconstructs
+    just enough PipelineContext to re-run storyboards → metadata → zip. Nothing
+    re-extracts and nothing re-transcribes; a failure leaves the existing
+    dataset exactly as it was.
+    """
+    import json
+
+    from app.pipeline.context import PipelineContext
+    from app.pipeline.steps.generate_metadata import GenerateMetadataStep
+    from app.pipeline.steps.storyboards import StoryboardStep
+    from app.pipeline.steps.zip_output import ZipOutputStep
+    from app.utils.timestamps import now_utc_iso
+
+    storage = get_storage()
+    db = get_session()
+    try:
+        job = db.get(Job, job_id)
+        if job is None:
+            logger.warning("Cannot regenerate storyboards: job %s no longer exists", job_id)
+            return {"status": "not_found"}
+        job_options = dict(job.options or {})
+        job_mode = job.mode
+        original_filename = job.original_filename
+        stored_source_filename = job.stored_source_filename
+        source_url = job.source_url
+        source_sha256 = job.source_sha256
+        performance = job.performance
+    finally:
+        db.close()
+
+    def _read_json(*parts, default=None):
+        rel = f"{job_id}/" + "/".join(parts)
+        if not storage.exists(rel):
+            return default
+        try:
+            return json.loads(storage.get(rel).read_bytes())
+        except ValueError:
+            return default
+
+    manifest = _read_json("manifest.json", default={}) or {}
+    frames = _read_json("metadata", "frames.json", default=[]) or []
+    transcript = _read_json("transcript", "transcript.json", default=None)
+    if transcript is None:
+        transcript = {"language": None, "skipped": True, "skipped_reason": "not_run", "segments": []}
+
+    logs: list[tuple[str, str]] = []
+
+    def persist_log(level: str, message: str) -> None:
+        logs.append((level, message))
+        session = get_session()
+        try:
+            session.add(JobLog(job_id=job_id, level=level, message=message))
+            session.commit()
+        finally:
+            session.close()
+
+    ctx = PipelineContext(
+        job_id=job_id,
+        storage=storage,
+        options=job_options,
+        log=persist_log,
+        set_step_progress=lambda step, pct: None,
+        should_cancel=lambda: False,
+        update_job=lambda fields: None,
+    )
+    ctx.shared.update(
+        {
+            "job_type": "video",
+            "mode": job_mode,
+            "original_filename": original_filename,
+            "stored_source_filename": stored_source_filename,
+            "source_relative_path": ctx.job_relative("source", stored_source_filename or "video.mp4"),
+            "source_url": source_url,
+            "source_sha256": source_sha256,
+            "started_at": (manifest.get("processing") or {}).get("started_at"),
+            "video": manifest.get("video") or {},
+            "transcript": transcript,
+            "frames": frames,
+            "frame_count": (manifest.get("frame_counts") or {}).get("adaptive", len(frames)),
+            "frame_counts_by_category": manifest.get("frame_counts") or {},
+            "performance": performance,
+            "stage_reports": manifest.get("extraction_report") or [],
+            "rebuilt_at": now_utc_iso(),
+        }
+    )
+
+    persist_log("info", "Regenerating storyboards from the existing frames (no re-extraction)")
+    try:
+        StoryboardStep().run(ctx)
+        GenerateMetadataStep().run(ctx)
+        ZipOutputStep().run(ctx)
+    except Exception as exc:  # noqa: BLE001 - never damage a completed dataset
+        logger.exception("Storyboard regeneration failed for job %s", job_id)
+        persist_log("error", f"Storyboard regeneration failed ({type(exc).__name__}: {exc})")
+        return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+
+    board = ctx.shared.get("storyboards") or {}
+    persist_log(
+        "info",
+        f"Storyboards regenerated: {len(board.get('storyboards') or [])} sheet(s)",
+    )
+    return {"status": board.get("status", "unknown"), "sheets": len(board.get("storyboards") or [])}
 
 
 @celery_app.task(name="app.tasks.cleanup_expired_jobs")
