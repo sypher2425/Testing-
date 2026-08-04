@@ -129,6 +129,29 @@ class Settings(BaseSettings):
     RESEARCH_MAX_RESULTS: int = 25
     RESEARCH_SUB_LANGS: str = "en.*"
 
+    # Storyboards: labeled contact sheets that let an AI read the visual
+    # timeline without opening every frame. Sized as an INDEX, not a detail
+    # view — vision models downscale a 2400px sheet to ~1568px, so a sheet
+    # packed with 40 tiles becomes unreadable. The manifest links every tile
+    # back to its full-resolution frame for detail work.
+    STORYBOARD_ENABLED: bool = True
+    STORYBOARD_SHEET_WIDTH_PX: int = 2400
+    # Stops a portrait grid (tall tiles) from becoming an unreadable ribbon.
+    STORYBOARD_MAX_SHEET_HEIGHT_PX: int = 4200
+    STORYBOARD_MAX_TILES_PER_SHEET: int = 24
+    # Portrait frames get fewer columns than landscape ones: the tiles are
+    # taller, so the same column count would double the sheet height.
+    STORYBOARD_COLUMNS_PORTRAIT: int = 5
+    STORYBOARD_COLUMNS_LANDSCAPE: int = 6
+    STORYBOARD_JPEG_QUALITY: int = 90
+    STORYBOARD_INCLUDE_CAPTIONS: bool = True
+    STORYBOARD_THEME: str = "dark"  # dark | light
+    # Uniform-timeline sheet: one frame every N seconds, widened automatically
+    # when the extracted frames are sparser than that.
+    STORYBOARD_TIMELINE_INTERVAL_SECONDS: float = 1.0
+    # Key-moment summary size — a short highlight reel, not a second full pass.
+    STORYBOARD_KEY_MOMENTS_MAX: int = 24
+
     # ZIP output. The source video is excluded by default: it is already on
     # disk (and downloadable via /api/jobs/{id}/video), and deflating tens of
     # GB of already-compressed H.264 costs hours of CPU for ~0% saving plus a

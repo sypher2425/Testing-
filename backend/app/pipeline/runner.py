@@ -45,6 +45,7 @@ def _build_pipeline(job_type: str = "video") -> list:
     from app.pipeline.steps.generate_metadata import GenerateMetadataStep
     from app.pipeline.steps.load_model import LoadWhisperModelStep
     from app.pipeline.steps.probe import ProbeStep
+    from app.pipeline.steps.storyboards import StoryboardStep
     from app.pipeline.steps.transcribe import TranscribeStep
 
     return [
@@ -53,6 +54,7 @@ def _build_pipeline(job_type: str = "video") -> list:
         LoadWhisperModelStep(),
         TranscribeStep(),
         ExtractFramesStep(),
+        StoryboardStep(),
         GenerateMetadataStep(),
         ZipOutputStep(),
     ]

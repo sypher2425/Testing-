@@ -234,6 +234,38 @@ class GenerateMetadataStep(PipelineStep):
             }
         )
 
+        # storyboards/ — contact sheets built by StoryboardStep, plus the
+        # manifest that maps each tile back to its full-resolution frame.
+        storyboards = ctx.shared.get("storyboards") or {}
+        storyboard_summary = {
+            "status": storyboards.get("status", st.SKIPPED),
+            "reason": storyboards.get("reason"),
+            "sheet_count": len(storyboards.get("storyboards") or []),
+            "types": storyboards.get("types_built") or [],
+            "manifest": "storyboard_manifest.json" if storyboards.get("storyboards") else None,
+            "layout": storyboards.get("layout"),
+            "unavailable_frames": storyboards.get("unavailable_frames", 0),
+        }
+        for sheet in storyboards.get("storyboards") or []:
+            files.append(
+                {
+                    "path": sheet["file"],
+                    "description": (
+                        f"{sheet['type']} storyboard sheet {sheet['sheet_index']}/{sheet['sheet_count']} — "
+                        f"{len(sheet['frames'])} frames, {sheet['columns']} columns, chronological"
+                    ),
+                    "size_bytes": sheet.get("size_bytes", 0),
+                }
+            )
+        if storyboard_summary["manifest"]:
+            files.append(
+                {
+                    "path": "storyboard_manifest.json",
+                    "description": "Maps every storyboard tile to its source frame, timestamp and transcript segment",
+                    "size_bytes": ctx.storage.size_of(ctx.job_relative("storyboard_manifest.json")),
+                }
+            )
+
         ctx.set_step_progress(self.name, 75)
 
         # R1.5: record EFFECTIVE extraction params (not the raw request),
@@ -357,6 +389,7 @@ class GenerateMetadataStep(PipelineStep):
             } or None,
             "events_count": len(events),
             "analysis_summary": build_analysis_summary(events, audio_stats),
+            "storyboards": storyboard_summary,
             "analyses": {},
         }
 

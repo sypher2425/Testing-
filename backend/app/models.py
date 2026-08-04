@@ -16,6 +16,7 @@ PIPELINE_STEPS = [
     "loading_model",
     "transcribing",
     "extracting_frames",
+    "generating_storyboards",
     "generating_metadata",
     "zipping",
 ]
