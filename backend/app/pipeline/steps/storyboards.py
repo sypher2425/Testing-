@@ -45,6 +45,21 @@ _CATEGORY_ADAPTIVE = "adaptive"
 _CATEGORY_OPENING = "opening_dense"
 
 
+def _option(options: dict, key: str, default):
+    """Read a job option, treating an explicit None as 'not set'.
+
+    Nullable fields on CreateJobOptions (storyboard_columns,
+    storyboard_tiles_per_sheet) are persisted into Job.options with a literal
+    None, so `options.get(key, default)` returns that None rather than the
+    default — the key is present. That is how `int(None)` reached production.
+
+    `default if value is None` rather than `value or default` on purpose:
+    False is a real value for the boolean toggles and must survive.
+    """
+    value = options.get(key)
+    return default if value is None else value
+
+
 def _sorted_by_time(frames: list[dict]) -> list[dict]:
     """ctx.shared['frames'] is adaptive + opening_dense + key_events
     concatenated, so it jumps backwards in time twice. Every sheet needs real
@@ -84,7 +99,7 @@ class StoryboardStep(PipelineStep):
         ctx.set_step_progress(self.name, 0)
         settings = get_settings()
 
-        if not ctx.options.get("storyboard_enabled", settings.STORYBOARD_ENABLED):
+        if not _option(ctx.options, "storyboard_enabled", settings.STORYBOARD_ENABLED):
             ctx.info("Storyboards disabled for this job")
             ctx.shared["storyboards"] = {"status": "skipped", "reason": "disabled_by_option"}
             ctx.set_step_progress(self.name, 100)
@@ -127,13 +142,13 @@ class StoryboardStep(PipelineStep):
 
         options = ctx.options
         include_captions = bool(
-            options.get("storyboard_include_captions", settings.STORYBOARD_INCLUDE_CAPTIONS)
+            _option(options, "storyboard_include_captions", settings.STORYBOARD_INCLUDE_CAPTIONS)
         )
-        columns_override = options.get("storyboard_columns")
-        theme = str(options.get("storyboard_theme", settings.STORYBOARD_THEME))
-        quality = int(options.get("storyboard_quality", settings.STORYBOARD_JPEG_QUALITY))
+        columns_override = _option(options, "storyboard_columns", None)
+        theme = str(_option(options, "storyboard_theme", settings.STORYBOARD_THEME))
+        quality = int(_option(options, "storyboard_quality", settings.STORYBOARD_JPEG_QUALITY))
         max_tiles = int(
-            options.get("storyboard_tiles_per_sheet", settings.STORYBOARD_MAX_TILES_PER_SHEET)
+            _option(options, "storyboard_tiles_per_sheet", settings.STORYBOARD_MAX_TILES_PER_SHEET)
         )
 
         # Tile geometry follows the source frames, not the source video: the
@@ -358,8 +373,10 @@ class StoryboardStep(PipelineStep):
             duration = float(chronological[-1].get("timestamp") or 0.0) or 1.0
 
         interval = float(
-            ctx.options.get(
-                "storyboard_timeline_interval", settings.STORYBOARD_TIMELINE_INTERVAL_SECONDS
+            _option(
+                ctx.options,
+                "storyboard_timeline_interval",
+                settings.STORYBOARD_TIMELINE_INTERVAL_SECONDS,
             )
         )
         interval = max(interval, 0.05)

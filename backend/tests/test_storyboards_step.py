@@ -336,3 +336,83 @@ def test_captions_can_be_turned_off(tmp_path):
     )
     StoryboardStep().run(ctx)
     assert _sheets(ctx)["layout"]["captions"] is False
+
+
+# --------------------------------------------- real persisted option shapes
+
+def _persisted_options(**overrides) -> dict:
+    """Exactly what lands in Job.options for a real job.
+
+    CreateJobOptions declares storyboard_columns / storyboard_tiles_per_sheet
+    as `int | None = None`, so model_dump writes those keys with an explicit
+    None. dict.get(key, default) then returns the stored None rather than the
+    default — which is how int(None) reached production.
+    """
+    from app.schemas import CreateJobOptions
+
+    options = CreateJobOptions(**overrides).model_dump(mode="json")
+    options["performance_overrides"] = {}
+    options["events"] = []
+    return options
+
+
+def test_runs_with_the_real_persisted_option_shape(tmp_path):
+    """Regression: every previous test passed hand-written options, so the one
+    shape that actually ships was never exercised. Before the fix this raises
+    TypeError: int() argument must be ... not 'NoneType'."""
+    ctx, _ = _build_job(tmp_path, adaptive=6, dense=4, options=_persisted_options())
+
+    StoryboardStep().run(ctx)
+
+    manifest = _sheets(ctx)
+    assert manifest["status"] == "success"
+    assert manifest["storyboards"], "no sheets were produced"
+
+
+def test_explicit_none_options_fall_back_to_settings(tmp_path):
+    """A stored None means 'not set', not 'use None'."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    options = _persisted_options()
+    assert options["storyboard_columns"] is None  # the shape we're guarding
+    assert options["storyboard_tiles_per_sheet"] is None
+
+    ctx, _ = _build_job(tmp_path, adaptive=8, dense=0, options=options)
+    StoryboardStep().run(ctx)
+
+    layout = _sheets(ctx)["layout"]
+    assert layout["tiles_per_sheet"] <= settings.STORYBOARD_MAX_TILES_PER_SHEET
+    assert layout["jpeg_quality"] == settings.STORYBOARD_JPEG_QUALITY
+    assert layout["theme"] == settings.STORYBOARD_THEME
+    # The quiet variant of the same bug: bool(None) would silently disable
+    # captions instead of falling back to the default.
+    assert layout["captions"] is True
+
+
+def test_false_toggles_are_honoured_not_treated_as_unset(tmp_path):
+    """The None-handling must not swallow a legitimate False."""
+    ctx, _ = _build_job(
+        tmp_path, adaptive=4, dense=0, options=_persisted_options(storyboard_include_captions=False)
+    )
+    StoryboardStep().run(ctx)
+    assert _sheets(ctx)["layout"]["captions"] is False
+
+    ctx2, _ = _build_job(
+        tmp_path / "off", adaptive=4, dense=0, options=_persisted_options(storyboard_enabled=False)
+    )
+    StoryboardStep().run(ctx2)
+    assert ctx2.shared["storyboards"]["reason"] == "disabled_by_option"
+
+
+def test_explicit_option_values_still_win(tmp_path):
+    ctx, _ = _build_job(
+        tmp_path,
+        adaptive=10,
+        dense=0,
+        options=_persisted_options(storyboard_columns=3, storyboard_tiles_per_sheet=6),
+    )
+    StoryboardStep().run(ctx)
+    layout = _sheets(ctx)["layout"]
+    assert layout["columns"] == 3
+    assert layout["tiles_per_sheet"] <= 6

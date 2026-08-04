@@ -304,6 +304,72 @@ def test_regenerate_task_rebuilds_without_touching_frames(tmp_path):
     assert storage.exists(f"{job_id}/output.zip")
 
 
+def test_regenerate_works_with_real_persisted_job_options(tmp_path):
+    """The reported failure: Regenerate on a job whose stored options came
+    from CreateJobOptions().model_dump() crashed with int(None) because the
+    nullable storyboard fields persist as explicit None."""
+    from app.schemas import CreateJobOptions
+    from app.storage import get_storage
+    from app.tasks import regenerate_storyboards
+
+    storage = get_storage()
+    persisted = CreateJobOptions().model_dump(mode="json")
+    persisted["performance_overrides"] = {}
+    persisted["events"] = []
+    assert persisted["storyboard_tiles_per_sheet"] is None  # the shape that broke
+
+    session = get_session()
+    try:
+        job = Job(
+            original_filename="real.mp4",
+            stored_source_filename="video.mp4",
+            mode="adaptive",
+            status="completed",
+            options=persisted,
+        )
+        session.add(job)
+        session.commit()
+        job_id = job.id
+    finally:
+        session.close()
+
+    frames_meta = []
+    for i in range(4):
+        buf = io.BytesIO()
+        Image.new("RGB", (180, 320), (40 + i * 30, 70, 130)).save(buf, "JPEG")
+        storage.save_bytes(f"{job_id}/frames/{i:04d}.000.jpg", buf.getvalue())
+        frames_meta.append(
+            {
+                "frame": i,
+                "timestamp": float(i),
+                "image": f"{i:04d}.000.jpg",
+                "mode": "adaptive",
+                "category": "adaptive",
+            }
+        )
+    storage.save_bytes(f"{job_id}/metadata/frames.json", json.dumps(frames_meta).encode())
+    storage.save_bytes(f"{job_id}/source/video.mp4", b"fake")
+    storage.save_bytes(
+        f"{job_id}/manifest.json",
+        json.dumps(
+            {
+                "video": {"duration_seconds": 4.0, "width": 180, "height": 320},
+                "frame_counts": {"adaptive": 4, "opening_dense": 0, "key_events": 0},
+                "processing": {"started_at": "2026-01-01T00:00:00+00:00"},
+            }
+        ).encode(),
+    )
+
+    result = regenerate_storyboards(job_id)
+
+    assert result["status"] == "success", result
+    assert result["sheets"] >= 1
+    manifest = json.loads(storage.get(f"{job_id}/storyboard_manifest.json").read_bytes())
+    assert manifest["status"] == "success"
+    # Captions must not have silently flipped off via bool(None).
+    assert manifest["layout"]["captions"] is True
+
+
 def test_regenerate_task_on_missing_job_is_a_no_op():
     from app.tasks import regenerate_storyboards
 
