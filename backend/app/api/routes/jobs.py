@@ -228,6 +228,10 @@ async def create_job_from_stream(
     opening_dense_enabled: bool = Query(True),
     opening_dense_duration: float | None = Query(None),
     opening_dense_interval: float | None = Query(None),
+    storyboard_enabled: bool = Query(True),
+    storyboard_columns: int | None = Query(None),
+    storyboard_tiles_per_sheet: int | None = Query(None),
+    storyboard_include_captions: bool = Query(True),
     events: str | None = Query(None),
     manual_title: str | None = Query(None),
     manual_description: str | None = Query(None),
@@ -260,6 +264,10 @@ async def create_job_from_stream(
         opening_dense_enabled=opening_dense_enabled,
         opening_dense_duration=opening_dense_duration,
         opening_dense_interval=opening_dense_interval,
+        storyboard_enabled=storyboard_enabled,
+        storyboard_columns=storyboard_columns,
+        storyboard_tiles_per_sheet=storyboard_tiles_per_sheet,
+        storyboard_include_captions=storyboard_include_captions,
     )
     parsed_events = _parse_events(events)
     if not filename.strip():
@@ -368,6 +376,10 @@ async def create_job(
     opening_dense_enabled: bool = Form(True),
     opening_dense_duration: float | None = Form(None),
     opening_dense_interval: float | None = Form(None),
+    storyboard_enabled: bool = Form(True),
+    storyboard_columns: int | None = Form(None),
+    storyboard_tiles_per_sheet: int | None = Form(None),
+    storyboard_include_captions: bool = Form(True),
     events: str | None = Form(None),
     db: Session = Depends(db_session),
     settings: Settings = Depends(get_settings),
@@ -382,6 +394,10 @@ async def create_job(
         opening_dense_enabled=opening_dense_enabled,
         opening_dense_duration=opening_dense_duration,
         opening_dense_interval=opening_dense_interval,
+        storyboard_enabled=storyboard_enabled,
+        storyboard_columns=storyboard_columns,
+        storyboard_tiles_per_sheet=storyboard_tiles_per_sheet,
+        storyboard_include_captions=storyboard_include_captions,
     )
     parsed_events = _parse_events(events)
 

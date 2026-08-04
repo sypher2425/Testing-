@@ -11,6 +11,7 @@ import type {
   Manifest,
   ManualPerformanceOverrides,
   ResearchManifest,
+  StoryboardManifest,
   TranscriptJSON,
 } from "./types";
 
@@ -80,6 +81,15 @@ export async function createJob(
       frame_format: options.frame_format,
       frame_max_dim: String(options.frame_max_dim),
     });
+    for (const key of [
+      "storyboard_enabled",
+      "storyboard_columns",
+      "storyboard_tiles_per_sheet",
+      "storyboard_include_captions",
+    ] as const) {
+      const value = options[key];
+      if (value !== undefined) params.set(key, String(value));
+    }
     if (manualOverrides) {
       for (const [key, value] of Object.entries(manualOverrides)) {
         if (value !== undefined && value !== null && value !== "") {
@@ -97,6 +107,15 @@ export async function createJob(
     formData.append("target_frames", String(options.target_frames));
     formData.append("frame_format", options.frame_format);
     formData.append("frame_max_dim", String(options.frame_max_dim));
+    for (const key of [
+      "storyboard_enabled",
+      "storyboard_columns",
+      "storyboard_tiles_per_sheet",
+      "storyboard_include_captions",
+    ] as const) {
+      const value = options[key];
+      if (value !== undefined) formData.append(key, String(value));
+    }
     if (manualOverrides) {
       for (const [key, value] of Object.entries(manualOverrides)) {
         if (value !== undefined && value !== null && value !== "") {
@@ -230,7 +249,29 @@ export async function getLogs(jobId: string, sinceId = 0): Promise<LogsResponse>
   return handleResponse<LogsResponse>(res);
 }
 
-export function downloadUrl(jobId: string, asset: "zip" | "transcript" | "frames"): string {
+export async function getStoryboardManifest(jobId: string): Promise<StoryboardManifest> {
+  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/storyboards`, { cache: "no-store" });
+  return handleResponse<StoryboardManifest>(res);
+}
+
+/** Direct URL for a sheet. `file` is the manifest path, e.g.
+ * "storyboards/adaptive_storyboard_01.jpg". */
+export function storyboardUrl(jobId: string, file: string): string {
+  const filename = file.replace(/^storyboards\//, "");
+  return `${API_BASE_URL}/api/jobs/${jobId}/storyboards/${encodeURIComponent(filename)}`;
+}
+
+export async function regenerateStoryboards(jobId: string): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/storyboards/regenerate`, {
+    method: "POST",
+  });
+  return handleResponse<{ status: string }>(res);
+}
+
+export function downloadUrl(
+  jobId: string,
+  asset: "zip" | "transcript" | "frames" | "storyboards"
+): string {
   return `${API_BASE_URL}/api/jobs/${jobId}/download?asset=${asset}`;
 }
 

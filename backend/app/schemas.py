@@ -27,6 +27,11 @@ class CreateJobOptions(BaseModel):
     opening_dense_enabled: bool = True
     opening_dense_duration: float | None = Field(default=None, ge=1, le=60)
     opening_dense_interval: float | None = Field(default=None, ge=0.05, le=5)
+    # Storyboard sheets (None = fall back to the env default)
+    storyboard_enabled: bool = True
+    storyboard_columns: int | None = Field(default=None, ge=2, le=10)
+    storyboard_tiles_per_sheet: int | None = Field(default=None, ge=4, le=60)
+    storyboard_include_captions: bool = True
 
     @field_validator("interval_ms")
     @classmethod

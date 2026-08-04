@@ -6,6 +6,7 @@ import type { JobStatusResponse } from "@/lib/types";
 import FrameGallery from "./FrameGallery";
 import JobLogPanel from "./JobLogPanel";
 import ManifestSummary from "./ManifestSummary";
+import StoryboardPanel from "./StoryboardPanel";
 import PerformancePanel from "./PerformancePanel";
 import StatusChip from "./StatusChip";
 import TranscriptPanel from "./TranscriptPanel";
@@ -61,6 +62,7 @@ export default function ResultsView({ job }: { job: JobStatusResponse }) {
 
       <PerformancePanel jobId={job.job_id} />
       <ManifestSummary jobId={job.job_id} />
+      <StoryboardPanel jobId={job.job_id} />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <section>

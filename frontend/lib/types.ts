@@ -14,6 +14,78 @@ export interface CreateJobOptions {
   target_frames: number;
   frame_format: FrameFormat;
   frame_max_dim: number;
+  // Storyboard sheet generation (all optional; server defaults apply).
+  storyboard_enabled?: boolean;
+  storyboard_columns?: number;
+  storyboard_tiles_per_sheet?: number;
+  storyboard_include_captions?: boolean;
+}
+
+// --- Storyboards ---
+
+export type StoryboardType =
+  | "adaptive"
+  | "opening_dense"
+  | "timeline"
+  | "transcript"
+  | "key_moments";
+
+export interface StoryboardTile {
+  tileIndex: number;
+  frameNumber: number;
+  timestampSeconds: number;
+  timestampLabel: string;
+  sourceFrame: string;
+  transcriptSegment: {
+    index: number;
+    start: number | null;
+    end: number | null;
+    text: string | null;
+  } | null;
+  sceneId?: number;
+  category?: string;
+  eventId?: string;
+}
+
+export interface StoryboardSheet {
+  type: StoryboardType | string;
+  file: string;
+  sheet_index: number;
+  sheet_count: number;
+  columns: number;
+  rows: number;
+  tile_width: number;
+  tile_height: number;
+  size_bytes: number;
+  unavailable_frames: number;
+  frames: StoryboardTile[];
+}
+
+export interface StoryboardManifest {
+  status: string;
+  reason?: string | null;
+  generated_at?: string | null;
+  video?: {
+    filename?: string | null;
+    durationSeconds?: number | null;
+    width?: number | null;
+    height?: number | null;
+    fps?: number | null;
+  };
+  layout?: {
+    sheet_width: number;
+    columns: number;
+    rows_per_sheet: number;
+    tiles_per_sheet: number;
+    tile_width: number;
+    tile_height: number;
+    captions: boolean;
+    theme: string;
+    jpeg_quality: number;
+  };
+  types_built: string[];
+  unavailable_frames?: number;
+  storyboards: StoryboardSheet[];
 }
 
 export interface CreateJobResponse {
@@ -42,6 +114,7 @@ export type JobStatusValue =
   | "loading_model"
   | "transcribing"
   | "extracting_frames"
+  | "generating_storyboards"
   | "generating_metadata"
   | "zipping"
   | "searching"
@@ -243,6 +316,7 @@ export const PIPELINE_STEP_ORDER: { key: string; label: string }[] = [
   { key: "loading_model", label: "Loading transcription model" },
   { key: "transcribing", label: "Transcribing audio" },
   { key: "extracting_frames", label: "Extracting frames" },
+  { key: "generating_storyboards", label: "Building storyboards" },
   { key: "generating_metadata", label: "Generating metadata" },
   { key: "zipping", label: "Building ZIP archive" },
 ];
