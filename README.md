@@ -148,6 +148,8 @@ concurrency 1 is the stable configuration.
   frames/0000.000.jpg ...           # adaptive frames (flat, unchanged from v1)
   frames/opening_dense/...          # every 0.25s of the first 8s (configurable)
   frames/key_events/...             # ±0.25s around each annotated event
+  storyboards/                      # labeled contact sheets (see Storyboards)
+  storyboard_manifest.json          # maps every tile back to its source frame
   metadata/frames.json              # all frames w/ category, event_id, phash, transcript link
   analytics/performance.json        # engagement metrics + rates, each w/ status/source
   content/caption.txt               # exact post caption (URL jobs)
@@ -326,6 +328,114 @@ UI, OCR, AI/Gemini integration, automatic event detection, retention
 estimation, comment summarization, demographic import, and adaptive-frame
 perceptual deduplication.
 
+## Storyboards
+
+Hundreds of loose frames are hard for a model to reason about: it has to open
+each one and rebuild the timeline itself. After extraction the pipeline
+composes the frames into labeled contact sheets in `storyboards/`, so the
+visual timeline can be read at a glance.
+
+**Sheets are an index, not a detail view.** Vision models downscale large
+images (a 2400px sheet typically becomes ~1568px), so a sheet packed with
+tiles cannot also be the place to read small UI text. The tiles are sized for
+timeline comprehension, and `storyboard_manifest.json` maps every tile back to
+its full-resolution frame — which stays in the dataset untouched — for detail
+work.
+
+### The five views
+
+| File | What it answers |
+|---|---|
+| `adaptive_storyboard_NN.jpg` | The representative pass over the whole video |
+| `opening_dense_storyboard_NN.jpg` | The first seconds in detail — hook, first visible object, time to first interaction |
+| `timeline_storyboard_NN.jpg` | An evenly spaced overview, independent of the adaptive algorithm |
+| `transcript_storyboard_NN.jpg` | One frame per spoken line — did the visual match the instruction? |
+| `key_moments_storyboard.jpg` | A single summary sheet of the biggest changes |
+
+In `interval` / `per_second` modes the main frame series still carries
+`category: "adaptive"` (that is the dataset's own vocabulary for "the main
+series"), so its sheets are named `adaptive_storyboard_NN.jpg` regardless of
+the sampling mode.
+
+### Tiles and layout
+
+Every tile carries a unique frame number, an exact `MM:SS.mmm` timestamp, the
+transcript line active at that moment when one exists, and a scene or segment
+label. Labels live in a dedicated caption strip **under** the frame, never over
+it. Reading order is strictly left to right, then top to bottom.
+
+Frames are letterboxed into the tile box — never cropped or stretched — and the
+column count follows orientation: portrait video gets 5 columns, landscape 6,
+because portrait tiles are tall and the same column count would double the
+sheet height. Row count is additionally bounded by `STORYBOARD_MAX_SHEET_HEIGHT_PX`.
+Typical results at defaults: a portrait sheet is 2400×3974 with 20 tiles at
+463×823px; a landscape sheet is 2400×1450 with 24 tiles at 384×216px. Sheets
+split automatically once the tiles overflow, and the last page is trimmed to
+the rows it actually uses.
+
+### Transcript captions
+
+A tile is matched to the transcript segment active at its timestamp
+(`start <= t < end`). The transcript-aligned view instead picks the frame
+nearest each segment's midpoint and forces that segment's caption onto it, so a
+frame that drifts into a neighbouring segment is still labeled with the line it
+illustrates. Captions wrap to the caption strip and ellipsise only when they
+must; **the complete text is always preserved in the manifest**. With no
+transcript, storyboards still build — the transcript view is simply absent.
+
+### storyboard_manifest.json
+
+```json
+{
+  "status": "success",
+  "video": { "filename": "clip.mp4", "durationSeconds": 32.0, "width": 1080, "height": 1920, "fps": 30.0 },
+  "layout": { "sheet_width": 2400, "columns": 5, "tiles_per_sheet": 20, "tile_width": 463, "tile_height": 823, "captions": true },
+  "types_built": ["adaptive", "opening_dense", "timeline", "transcript", "key_moments"],
+  "storyboards": [
+    {
+      "type": "adaptive",
+      "file": "storyboards/adaptive_storyboard_01.jpg",
+      "sheet_index": 1, "sheet_count": 2, "columns": 5, "rows": 4,
+      "frames": [
+        {
+          "tileIndex": 1, "frameNumber": 0,
+          "timestampSeconds": 0.0, "timestampLabel": "00:00.000",
+          "sourceFrame": "frames/0000.000.jpg",
+          "transcriptSegment": { "index": 0, "start": 0.0, "end": 6.4, "text": "Add a goal counter at the top" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Regenerating
+
+`POST /api/jobs/{id}/storyboards/regenerate` (the **Regenerate** button on the
+results page) rebuilds the sheets from the frames already on disk — no
+re-extraction, no re-transcription. Use it after changing layout settings or to
+retry when storyboard generation failed on a job whose frames are fine. The
+rebuild refreshes `storyboard_manifest.json`, `manifest.json` and `output.zip`,
+and stamps `manifest.processing.last_rebuilt_at`.
+
+### Failure behaviour
+
+Storyboard generation is additive and never fails a job. A missing or corrupt
+frame renders a labeled placeholder tile and is counted in
+`unavailable_frames`; a composition error is recorded as a status in
+`manifest.storyboards` with a pointer to regenerate, leaving the frames and
+transcript untouched.
+
+### Dense sampling (every 0.2s)
+
+The **Dense — every 0.2s** preset in Advanced sets interval mode to 200ms.
+Because `MAX_FRAMES` (2000) still applies, a video long enough to exceed it has
+its interval **widened** rather than its tail dropped — the whole video stays
+covered, a warning names both intervals in the job log, and
+`extraction_params.interval` records `requested_interval_seconds` alongside
+`effective_interval_seconds`. A 60-minute video asked for at 0.2s is sampled at
+1.8s; nothing silently claims otherwise.
+
 ## API
 
 All responses are JSON. Errors use a consistent envelope:
@@ -475,6 +585,16 @@ See `.env.example` for the full annotated list. Highlights:
 | `UPLOAD_DISK_HEADROOM_MULTIPLIER` | 1.5 | Disk required = upload size x this + the margin, covering extracted frames, temp audio, and the ZIP |
 | `UPLOAD_CHUNK_BYTES` | 8388608 (8MiB) | Streaming write size |
 | `ZIP_INCLUDE_SOURCE_VIDEO` | false | Whether `output.zip` contains the source video — see [Large uploads](#large-uploads) |
+| `STORYBOARD_ENABLED` | true | Build contact sheets after extraction — see [Storyboards](#storyboards) |
+| `STORYBOARD_SHEET_WIDTH_PX` | 2400 | Sheet width; tiles are sized from this and the column count |
+| `STORYBOARD_MAX_SHEET_HEIGHT_PX` | 4200 | Stops a portrait grid becoming an unreadable ribbon |
+| `STORYBOARD_MAX_TILES_PER_SHEET` | 24 | Upper bound per sheet; more tiles means smaller ones |
+| `STORYBOARD_COLUMNS_PORTRAIT` / `_LANDSCAPE` | 5 / 6 | Orientation-aware column defaults |
+| `STORYBOARD_JPEG_QUALITY` | 90 | Sheet JPEG quality |
+| `STORYBOARD_INCLUDE_CAPTIONS` | true | Draw frame number, timestamp and transcript line under each tile |
+| `STORYBOARD_THEME` | dark | `dark` or `light` sheet chrome |
+| `STORYBOARD_TIMELINE_INTERVAL_SECONDS` | 1.0 | Target spacing for the uniform timeline sheet |
+| `STORYBOARD_KEY_MOMENTS_MAX` | 24 | Cap for the key-moments summary (also bounded to one sheet) |
 | `WHISPER_MODEL_SIZE` | small | faster-whisper model; CPU-only unless `WHISPER_DEVICE=cuda` |
 | `ENABLE_DIARIZATION` | false | See [Diarization](#optional-speaker-diarization) below |
 | `MAX_FRAMES` | 2000 | Hard cap for `every_frame`; soft cap (with a warning) for other modes |
