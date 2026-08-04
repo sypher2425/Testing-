@@ -264,6 +264,19 @@ class GenerateMetadataStep(PipelineStep):
         extraction_params["mode"] = mode
         extraction_params["opening_dense"] = dense_config
         extraction_params["key_events"] = key_events_config
+        # Interval modes may widen their interval to keep whole-video coverage
+        # within MAX_FRAMES. Record what actually ran, not just what was asked
+        # for, so a consumer never mistakes 0.35s sampling for the 0.2s
+        # requested.
+        interval_config = ctx.shared.get("interval_config")
+        if interval_config:
+            extraction_params["interval"] = interval_config
+            extraction_params["interval_ms"] = round(
+                interval_config["effective_interval_seconds"] * 1000
+            )
+            extraction_params["requested_interval_ms"] = round(
+                interval_config["requested_interval_seconds"] * 1000
+            )
         # v2.2: the nested opening_dense block is canonical. The flat keys are
         # deprecated but always written FROM the effective config, so they can
         # never be null while enabled and never contradict the nested values

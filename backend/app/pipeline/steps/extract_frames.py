@@ -104,16 +104,61 @@ def _interval_for_count(duration: float, count: int) -> float:
     return max(duration / count, 0.1)
 
 
+def resolve_interval(
+    duration: float, requested_interval: float, cap: int | None
+) -> dict:
+    """Work out the interval that will actually be used, and say so.
+
+    The old behaviour truncated from the FRONT of the video: asking for a
+    frame every 0.2s on a 60-minute video produced 2000 frames covering only
+    the first 6m40s, with no warning and a manifest that still claimed 0.2s
+    sampling. Widening the interval instead keeps whole-video coverage, and
+    the caller reports the change.
+    """
+    requested_interval = max(float(requested_interval or 0.0), 0.001)
+    duration = max(float(duration or 0.0), 0.0)
+    result = {
+        "requested_interval_seconds": round(requested_interval, 4),
+        "effective_interval_seconds": round(requested_interval, 4),
+        "widened": False,
+        "reason": None,
+        "frame_count": 0,
+    }
+    if duration <= 0:
+        result["frame_count"] = 1
+        return result
+
+    wanted = int(duration / requested_interval) + 1
+    if cap is not None and wanted > cap:
+        effective = duration / cap
+        result["effective_interval_seconds"] = round(effective, 4)
+        result["widened"] = True
+        result["reason"] = (
+            f"A frame every {requested_interval:g}s over {duration:.1f}s would be "
+            f"{wanted} frames, above the MAX_FRAMES cap of {cap}. Widened to "
+            f"{effective:.3f}s so the whole video is still covered."
+        )
+        result["frame_count"] = cap
+    else:
+        result["frame_count"] = wanted
+    return result
+
+
 def _select_interval_timestamps(
     duration: float, interval_seconds: float, cap: int | None
 ) -> list[Selection]:
-    timestamps = []
-    t = 0.0
-    while t < duration:
-        timestamps.append(t)
-        t += interval_seconds
-        if cap is not None and len(timestamps) >= cap:
-            break
+    """Evenly spaced timestamps across the WHOLE video.
+
+    Timestamps are computed as `i * interval` rather than by repeatedly adding,
+    because float error compounds over thousands of iterations — at 0.2s over
+    an hour the drift is visible in the filenames.
+    """
+    plan = resolve_interval(duration, interval_seconds, cap)
+    interval = plan["effective_interval_seconds"]
+    count = plan["frame_count"]
+    if duration <= 0 or count <= 1:
+        return [Selection(timestamp=0.0, scene_id=None)]
+    timestamps = [round(i * interval, 3) for i in range(count) if i * interval < duration]
     if not timestamps:
         timestamps = [0.0]
     return [Selection(timestamp=ts, scene_id=None) for ts in timestamps]
@@ -185,10 +230,14 @@ class ExtractFramesStep(PipelineStep):
 
         selections = self._select(mode, duration, fps, ctx, settings)
 
+        # NB: the interval modes cap themselves inside resolve_interval (by
+        # widening the interval, not by dropping the tail), and adaptive is
+        # bounded by ADAPTIVE_MAX_FRAMES, so a post-hoc truncation here would
+        # be unreachable. A defensive clamp remains for any future mode.
         if len(selections) > settings.MAX_FRAMES:
             ctx.warning(
-                f"{mode} mode would produce {len(selections)} frames; "
-                f"truncating to MAX_FRAMES={settings.MAX_FRAMES}"
+                f"{mode} mode produced {len(selections)} selections; "
+                f"clamping to MAX_FRAMES={settings.MAX_FRAMES}"
             )
             selections = selections[: settings.MAX_FRAMES]
 
@@ -468,10 +517,10 @@ class ExtractFramesStep(PipelineStep):
                 raise PipelineFailedError(
                     "invalid_interval", "interval_ms must be at least 100ms"
                 )
-            return _select_interval_timestamps(duration, interval_ms / 1000.0, settings.MAX_FRAMES)
+            return self._interval_selection(ctx, duration, interval_ms / 1000.0, settings)
 
         if mode == "per_second":
-            return _select_interval_timestamps(duration, 1.0, settings.MAX_FRAMES)
+            return self._interval_selection(ctx, duration, 1.0, settings)
 
         if mode == "every_frame":
             estimated = int(duration * fps)
@@ -484,6 +533,18 @@ class ExtractFramesStep(PipelineStep):
                     {"estimated_frames": estimated, "max_frames": settings.MAX_FRAMES},
                 )
             frame_interval = 1.0 / fps if fps else 1.0
-            return _select_interval_timestamps(duration, frame_interval, settings.MAX_FRAMES)
+            return self._interval_selection(ctx, duration, frame_interval, settings)
 
         raise PipelineFailedError("invalid_mode", f"Unknown extraction mode: {mode}")
+
+    @staticmethod
+    def _interval_selection(
+        ctx: PipelineContext, duration: float, interval: float, settings
+    ) -> list[Selection]:
+        """Evenly spaced selection that records — and loudly reports — the
+        interval actually used when the request exceeds MAX_FRAMES."""
+        plan = resolve_interval(duration, interval, settings.MAX_FRAMES)
+        ctx.shared["interval_config"] = plan
+        if plan["widened"]:
+            ctx.warning(plan["reason"])
+        return _select_interval_timestamps(duration, interval, settings.MAX_FRAMES)
