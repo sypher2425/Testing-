@@ -118,6 +118,18 @@ class Settings(BaseSettings):
     # yt-dlp nightly channel days before they reach stable. Off by default —
     # nightlies are less tested — but worth enabling when a platform breaks.
     YTDLP_ALLOW_NIGHTLY_UPDATE: bool = False
+    # TikTok has two extraction paths: scraping the web page, and the mobile
+    # API. yt-dlp only tries the API when it has app info — and without one of
+    # these set, `_KNOWN_APP_INFO` is empty, so it goes straight to the web
+    # page and fails with "Unable to extract universal data for rehydration"
+    # when TikTok serves a bot-check instead of the embedded data.
+    #
+    # TIKTOK_DEVICE_ID is the easy one: in the TikTok mobile app, open
+    # Settings, scroll to the bottom, and tap the version number 5x.
+    TIKTOK_DEVICE_ID: str = ""
+    # Escape hatch for anything else: raw yt-dlp --extractor-args values,
+    # semicolon-separated (e.g. "tiktok:app_info=1234567890;youtube:player_client=web").
+    YTDLP_EXTRACTOR_ARGS: str = ""
     # MAX_COMMENTS is accepted as an alias for backward/forward compatibility.
     YTDLP_COMMENT_LIMIT: int = Field(
         default=100, validation_alias=AliasChoices("YTDLP_COMMENT_LIMIT", "MAX_COMMENTS")

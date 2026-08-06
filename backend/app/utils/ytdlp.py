@@ -86,18 +86,58 @@ class VideoMetadata:
     raw: dict = field(repr=False, default_factory=dict)
 
 
+# TikTok's web page returned no embedded data — it served a bot-check or an
+# interstitial instead. yt-dlp's own message tells you to update, but this is
+# a site-side block, not a stale extractor: the TikTok extractor has been
+# current since March 2026 and upstream has the issue open as a site-bug.
+# Given its own advice is misleading, it gets its own code so we neither
+# waste a self-update on it nor repeat the wrong explanation.
+_TIKTOK_WEB_BLOCKED_MARKER = "universal data for rehydration"
+
+TIKTOK_WEB_BLOCKED_MESSAGE = (
+    "TikTok returned a bot-check page instead of the video data. This is not an "
+    "outdated yt-dlp (despite what its own error text says) — TikTok is blocking "
+    "anonymous web extraction from this IP. Set TIKTOK_DEVICE_ID in .env to use "
+    "TikTok's mobile API instead of the web page: open the TikTok app, go to "
+    "Settings, scroll to the bottom and tap the version number 5 times to reveal "
+    "your device ID."
+)
+
+
 def _classify(stderr: str) -> str:
     lowered = stderr.lower()
     if any(marker in lowered for marker in _UNAVAILABLE_MARKERS):
         return "video_unavailable"
+    if _TIKTOK_WEB_BLOCKED_MARKER in lowered:
+        return "tiktok_web_blocked"
     if any(marker in lowered for marker in _EXTRACTOR_ERROR_MARKERS):
         return "extractor_outdated"
     return "download_failed"
 
 
+def extractor_args() -> list[str]:
+    """--extractor-args flags assembled from settings.
+
+    TIKTOK_DEVICE_ID is surfaced as its own setting because it is the one
+    that matters in practice: without app info of some kind, yt-dlp never
+    even attempts TikTok's mobile API and goes straight to scraping the web
+    page (see TikTokIE._real_extract). YTDLP_EXTRACTOR_ARGS is the raw
+    passthrough for everything else.
+    """
+    settings = get_settings()
+    flags: list[str] = []
+    if settings.TIKTOK_DEVICE_ID:
+        flags += ["--extractor-args", f"tiktok:device_id={settings.TIKTOK_DEVICE_ID}"]
+    for spec in settings.YTDLP_EXTRACTOR_ARGS.split(";"):
+        spec = spec.strip()
+        if spec:
+            flags += ["--extractor-args", spec]
+    return flags
+
+
 def _run(args: list[str], timeout: int) -> subprocess.CompletedProcess:
     cookies_file = get_settings().COOKIES_FILE
-    cmd = ["yt-dlp"]
+    cmd = ["yt-dlp", *extractor_args()]
     cookies_scratch_path: str | None = None
     # COOKIES_FILE is allowed to point at a file that doesn't exist yet
     # (e.g. the user hasn't dropped one into secrets/ yet) — degrade to no
@@ -219,9 +259,8 @@ def _self_update(log: callable) -> None:
         log(
             "warning",
             "yt-dlp has no browser-impersonation target available (curl_cffi missing). "
-            "TikTok and some Instagram URLs need it and will keep failing with "
-            "'Unable to extract universal data for rehydration' until the image is "
-            "rebuilt with the curl-cffi extra.",
+            "Some extractors request it to match a real browser's TLS fingerprint; "
+            "rebuild the image with the curl-cffi extra to enable it.",
         )
 
 
@@ -232,6 +271,18 @@ def _run_with_extractor_retry(args: list[str], timeout: int, log: callable) -> s
 
     stderr = proc.stderr.decode(errors="replace")
     code = _classify(stderr)
+    if code == "tiktok_web_blocked":
+        # Deliberately no self-update: updating provably does not fix this,
+        # and saying otherwise is what sent us chasing the wrong cause.
+        if get_settings().TIKTOK_DEVICE_ID:
+            raise YtDlpError(
+                code,
+                "TikTok's mobile API and web page both failed for this video. "
+                "The configured TIKTOK_DEVICE_ID may be stale or rejected — try "
+                "re-reading it from the TikTok app, or clear COOKIES_FILE and retry.",
+                stderr=stderr,
+            )
+        raise YtDlpError(code, TIKTOK_WEB_BLOCKED_MESSAGE, stderr=stderr)
     if code != "extractor_outdated":
         raise YtDlpError(code, _first_error_line(stderr) or "yt-dlp failed", stderr=stderr)
 

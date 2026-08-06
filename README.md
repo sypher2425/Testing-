@@ -523,18 +523,10 @@ reports "already the latest" and `YTDLP_ALLOW_NIGHTLY_UPDATE=true`, a nightly
 nightlies are less tested, and reproducible builds are the norm — turn it on
 when a platform breaks and stable hasn't caught up yet.
 
-**TLS browser impersonation (required for TikTok).** TikTok serves anonymous
-requests a bot-check page with no embedded data, which yt-dlp reports as:
-
-```
-ERROR: [TikTok] 75...: Unable to extract universal data for rehydration
-```
-
-That message *looks* like an outdated extractor — it is not, and updating
-will not fix it. yt-dlp needs `curl_cffi` to impersonate a real browser's TLS
-fingerprint, which is why `requirements.txt` installs
-`yt-dlp[default,curl-cffi]` rather than plain `yt-dlp`. Verify it inside the
-worker with:
+**TLS browser impersonation.** Several extractors ask to impersonate a real
+browser's TLS fingerprint, which needs `curl_cffi` — hence
+`requirements.txt` installing `yt-dlp[default,curl-cffi]` rather than plain
+`yt-dlp`. Verify it inside the worker with:
 
 ```bash
 docker compose exec worker yt-dlp --list-impersonate-targets
@@ -542,9 +534,11 @@ docker compose exec worker yt-dlp --list-impersonate-targets
 
 Real rows (`Chrome-133  Macos-15  curl_cffi`) mean it's working; rows marked
 `(unavailable)` mean the extra is missing — rebuild the image
-(`docker compose build worker`). The worker probes this itself and logs an
-explicit warning when a failed extraction coincides with no available target,
-so the log points at the real cause instead of at the version number.
+(`docker compose build worker`). The worker probes this itself and warns when
+a failed extraction coincides with no available target.
+
+Note that impersonation is *not* the fix for TikTok's "universal data for
+rehydration" error — that one has its own section below.
 
 **Cookies for account-gated fetches** (mainly Instagram view counts, which
 are often hidden from anonymous requests): drop a `cookies.txt` (exported
@@ -621,6 +615,62 @@ The pipeline reuses the video pipeline's step names (a strict subset, in the
 same order), so transcript jobs need no new job states, status chips or
 progress labels.
 
+### TikTok extraction
+
+TikTok fails differently from everything else, and its own error text points
+the wrong way:
+
+```
+ERROR: [TikTok] 7666…: Unable to extract universal data for rehydration;
+please report this issue … Confirm you are on the latest version using yt-dlp -U
+```
+
+That message says "update yt-dlp". **Updating does not fix it.** The TikTok
+extractor has been current since March 2026, and upstream tracks this as a
+site-bug, not an extractor bug. What is actually happening: TikTok served a
+bot-check page instead of the video data, so there was no embedded JSON to
+parse.
+
+yt-dlp has a second path — TikTok's **mobile API** — but it only attempts it
+when it has app info. Without any, `_KNOWN_APP_INFO` is empty and it goes
+straight to the web page that is being blocked:
+
+```python
+# yt_dlp/extractor/tiktok.py — TikTokIE._real_extract
+if self._KNOWN_APP_INFO:
+    try:
+        return self._extract_aweme_app(video_id)   # mobile API
+    except ExtractorError as e:
+        self.report_warning(f'{e}; trying with webpage')
+# ...falls through to the web page
+```
+
+So set `TIKTOK_DEVICE_ID` in `.env` to turn the mobile API on:
+
+```bash
+# TikTok app → Settings → scroll to the bottom → tap the version number 5×
+TIKTOK_DEVICE_ID=1234567890123456789
+```
+
+```bash
+docker compose up -d worker   # .env is read at container start; no rebuild needed
+```
+
+The web page stays as the fallback, so this only adds a path — it never
+removes one. Two things worth knowing:
+
+- **Cookies can hurt here.** The extractor solves a JS challenge and sets its
+  own TikTok cookies; a stale jar from `COOKIES_FILE` can conflict with that.
+  If TikTok is the only platform failing, try blanking `COOKIES_FILE` first —
+  it costs nothing and rules out a whole class of cause.
+- **This is IP-sensitive.** The same link can work from one network and get
+  bot-checked from another, which is why upstream labels the issue
+  `cant-reproduce`.
+
+Because the "update yt-dlp" advice is actively misleading, this failure gets
+its own error code (`tiktok_web_blocked`) rather than `extractor_outdated`,
+and the worker does **not** waste a self-update attempt on it.
+
 ## Research mode (topic search → transcript bundle)
 
 The Home page's **Research (transcripts)** tab turns a YouTube topic search
@@ -688,6 +738,8 @@ See `.env.example` for the full annotated list. Highlights:
 | `ADAPTIVE_MIN_FRAMES` / `ADAPTIVE_MAX_FRAMES` | 30 / 150 | Bounds for adaptive mode's target frame count |
 | `RETENTION_HOURS` | 72 | Jobs + artifacts are deleted this many hours after completion by a periodic Celery task |
 | `YTDLP_COMMENT_LIMIT` | 100 | Top comments (by likes) saved per URL-ingested job (`MAX_COMMENTS` accepted as an alias) |
+| `TIKTOK_DEVICE_ID` | (unset) | Switches TikTok to its mobile API instead of scraping the web page. Get it from the TikTok app: Settings → scroll to the bottom → tap the version number 5×. See [TikTok extraction](#tiktok-extraction) |
+| `YTDLP_EXTRACTOR_ARGS` | (unset) | Raw `--extractor-args` passthrough, semicolon-separated (e.g. `tiktok:app_info=…;youtube:player_client=web`) |
 | `YTDLP_ALLOW_NIGHTLY_UPDATE` | false | After a failed extraction, allow falling back to the yt-dlp nightly channel when stable is already current. Off by default (nightlies are less tested); worth enabling when TikTok/Instagram break |
 | `OPENING_DENSE_DURATION` / `OPENING_DENSE_INTERVAL` | 8 / 0.25 | Dense hook-analysis frames: one every INTERVAL seconds for the first DURATION seconds; per-job overridable, disable per job with `opening_dense_enabled=false` |
 | `COOKIES_FILE` | (unset) | In-container path to a cookies.txt for account-gated fetches — use `/run/secrets/cookies.txt` and drop the file at `secrets/cookies.txt` on the host; optional |

@@ -137,9 +137,8 @@ def test_self_update_pip_timeout_falls_back_without_raising():
 
 
 def test_self_update_warns_when_no_impersonation_target_is_available():
-    """The TikTok "Unable to extract universal data for rehydration" failure
-    looks like an outdated extractor, so it lands here — but updating never
-    fixes it. The log must say what actually would."""
+    """When an extractor asks to impersonate a browser and no target exists,
+    the log has to name that, or the missing dependency is invisible."""
     logs = []
     with patch("app.utils.ytdlp.get_version", return_value="2026.7.4"), patch(
         "app.utils.ytdlp._pip_install", return_value=_completed(["pip"], returncode=0)
@@ -408,3 +407,123 @@ def test_fetch_profile_reel_view_count_no_username_returns_none_without_calling_
         result = fetch_profile_reel_view_count("", "222", log=_noop_log)
     assert result is None
     mock_run.assert_not_called()
+
+
+# ------------------------------------------------- TikTok mobile API path
+
+
+def test_tiktok_rehydration_is_not_classified_as_an_outdated_extractor():
+    """yt-dlp's own text says "confirm you are on the latest version", which
+    is misleading: the extractor is current and updating does not fix it."""
+    stderr = (
+        "ERROR: [TikTok] 7666486121907358978: Unable to extract universal data for "
+        "rehydration; please report this issue on https://github.com/yt-dlp/yt-dlp/issues"
+        "?q= , filling out the appropriate issue template. Confirm you are on the "
+        "latest version using yt-dlp -U"
+    )
+    assert _classify(stderr) == "tiktok_web_blocked"
+
+
+def test_tiktok_web_block_does_not_waste_a_self_update():
+    from app.utils.ytdlp import TIKTOK_WEB_BLOCKED_MESSAGE
+
+    fail = _completed(
+        ["yt-dlp"], returncode=1,
+        stderr=b"ERROR: [TikTok] 123: Unable to extract universal data for rehydration",
+    )
+    settings = get_settings()
+    original = settings.TIKTOK_DEVICE_ID
+    settings.TIKTOK_DEVICE_ID = ""
+    try:
+        with patch("app.utils.ytdlp._run", return_value=fail), patch(
+            "app.utils.ytdlp._self_update"
+        ) as mock_update:
+            with pytest.raises(YtDlpError) as exc_info:
+                _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
+    finally:
+        settings.TIKTOK_DEVICE_ID = original
+
+    mock_update.assert_not_called()
+    assert exc_info.value.code == "tiktok_web_blocked"
+    assert exc_info.value.message == TIKTOK_WEB_BLOCKED_MESSAGE
+    assert "TIKTOK_DEVICE_ID" in exc_info.value.message
+
+
+def test_tiktok_web_block_with_a_device_id_already_set_says_something_different():
+    """Repeating "set TIKTOK_DEVICE_ID" to someone who already has one set is
+    the same unhelpful loop as "update yt-dlp"."""
+    fail = _completed(
+        ["yt-dlp"], returncode=1,
+        stderr=b"ERROR: [TikTok] 123: Unable to extract universal data for rehydration",
+    )
+    settings = get_settings()
+    original = settings.TIKTOK_DEVICE_ID
+    settings.TIKTOK_DEVICE_ID = "1234567890123456789"
+    try:
+        with patch("app.utils.ytdlp._run", return_value=fail):
+            with pytest.raises(YtDlpError) as exc_info:
+                _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
+    finally:
+        settings.TIKTOK_DEVICE_ID = original
+
+    assert "stale or rejected" in exc_info.value.message
+
+
+def test_device_id_is_passed_to_yt_dlp_as_an_extractor_arg():
+    """Without app info of some kind, yt-dlp never attempts TikTok's mobile
+    API at all — it goes straight to the web page that is being blocked."""
+    captured: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"{}", stderr=b"")
+
+    settings = get_settings()
+    original = settings.TIKTOK_DEVICE_ID
+    settings.TIKTOK_DEVICE_ID = "1234567890123456789"
+    try:
+        with patch("app.utils.ytdlp.subprocess.run", side_effect=fake_run):
+            _run(["--dump-single-json", "url"], timeout=30)
+    finally:
+        settings.TIKTOK_DEVICE_ID = original
+
+    assert "--extractor-args" in captured
+    assert "tiktok:device_id=1234567890123456789" in captured
+
+
+def test_no_extractor_args_are_passed_when_nothing_is_configured():
+    captured: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"{}", stderr=b"")
+
+    settings = get_settings()
+    originals = (settings.TIKTOK_DEVICE_ID, settings.YTDLP_EXTRACTOR_ARGS)
+    settings.TIKTOK_DEVICE_ID = ""
+    settings.YTDLP_EXTRACTOR_ARGS = ""
+    try:
+        with patch("app.utils.ytdlp.subprocess.run", side_effect=fake_run):
+            _run(["--dump-single-json", "url"], timeout=30)
+    finally:
+        settings.TIKTOK_DEVICE_ID, settings.YTDLP_EXTRACTOR_ARGS = originals
+
+    assert "--extractor-args" not in captured
+
+
+def test_raw_extractor_args_passthrough_supports_several_specs():
+    from app.utils.ytdlp import extractor_args
+
+    settings = get_settings()
+    originals = (settings.TIKTOK_DEVICE_ID, settings.YTDLP_EXTRACTOR_ARGS)
+    settings.TIKTOK_DEVICE_ID = ""
+    settings.YTDLP_EXTRACTOR_ARGS = "tiktok:app_info=123 ; youtube:player_client=web ;"
+    try:
+        flags = extractor_args()
+    finally:
+        settings.TIKTOK_DEVICE_ID, settings.YTDLP_EXTRACTOR_ARGS = originals
+
+    assert flags == [
+        "--extractor-args", "tiktok:app_info=123",
+        "--extractor-args", "youtube:player_client=web",
+    ], "blank segments from trailing/extra semicolons must not become empty flags"
