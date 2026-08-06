@@ -114,6 +114,10 @@ class Settings(BaseSettings):
     YTDLP_TIMEOUT_SECONDS: int = 1800
     YTDLP_METADATA_TIMEOUT_SECONDS: int = 120
     YTDLP_UPDATE_TIMEOUT_SECONDS: int = 120
+    # Extractor fixes for fast-moving sites (TikTok, Instagram) land on the
+    # yt-dlp nightly channel days before they reach stable. Off by default —
+    # nightlies are less tested — but worth enabling when a platform breaks.
+    YTDLP_ALLOW_NIGHTLY_UPDATE: bool = False
     # MAX_COMMENTS is accepted as an alias for backward/forward compatibility.
     YTDLP_COMMENT_LIMIT: int = Field(
         default=100, validation_alias=AliasChoices("YTDLP_COMMENT_LIMIT", "MAX_COMMENTS")

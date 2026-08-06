@@ -15,6 +15,7 @@ from app.utils.ytdlp import (
     extract_comments,
     extract_metadata,
     fetch_profile_reel_view_count,
+    impersonation_available,
 )
 
 
@@ -133,6 +134,118 @@ def test_self_update_pip_timeout_falls_back_without_raising():
         _self_update(lambda level, msg: logs.append((level, msg)))  # must not raise
 
     assert any("failed" in m.lower() for _, m in logs)
+
+
+def test_self_update_warns_when_no_impersonation_target_is_available():
+    """The TikTok "Unable to extract universal data for rehydration" failure
+    looks like an outdated extractor, so it lands here — but updating never
+    fixes it. The log must say what actually would."""
+    logs = []
+    with patch("app.utils.ytdlp.get_version", return_value="2026.7.4"), patch(
+        "app.utils.ytdlp._pip_install", return_value=_completed(["pip"], returncode=0)
+    ), patch("app.utils.ytdlp.impersonation_available", return_value=False):
+        _self_update(lambda level, msg: logs.append((level, msg)))
+
+    combined = " ".join(m for _, m in logs)
+    assert "unchanged" in combined
+    assert "curl_cffi" in combined
+    assert any(level == "warning" and "impersonation" in msg for level, msg in logs)
+
+
+def test_self_update_stays_quiet_about_impersonation_when_it_works():
+    logs = []
+    with patch("app.utils.ytdlp.get_version", return_value="2026.7.4"), patch(
+        "app.utils.ytdlp._pip_install", return_value=_completed(["pip"], returncode=0)
+    ), patch("app.utils.ytdlp.impersonation_available", return_value=True):
+        _self_update(lambda level, msg: logs.append((level, msg)))
+
+    assert not any("curl_cffi" in m for _, m in logs)
+
+
+def test_self_update_skips_the_nightly_channel_by_default():
+    calls = []
+    with patch("app.utils.ytdlp.get_version", return_value="2026.7.4"), patch(
+        "app.utils.ytdlp._pip_install",
+        side_effect=lambda spec, timeout, pre=False: calls.append(pre)
+        or _completed(["pip"], returncode=0),
+    ), patch("app.utils.ytdlp.impersonation_available", return_value=True):
+        _self_update(_noop_log)
+
+    assert calls == [False], "nightly must be opt-in"
+
+
+def test_self_update_tries_the_nightly_channel_when_enabled():
+    """Extractor fixes for TikTok/Instagram land on nightly days before
+    stable, so an operator can opt in when a platform breaks."""
+    calls = []
+    settings = get_settings()
+    original = settings.YTDLP_ALLOW_NIGHTLY_UPDATE
+    settings.YTDLP_ALLOW_NIGHTLY_UPDATE = True
+    logs = []
+    try:
+        with patch(
+            "app.utils.ytdlp.get_version", side_effect=["2026.7.4", "2026.7.4", "2026.8.4.234419"]
+        ), patch(
+            "app.utils.ytdlp._pip_install",
+            side_effect=lambda spec, timeout, pre=False: calls.append(pre)
+            or _completed(["pip"], returncode=0),
+        ), patch("app.utils.ytdlp.impersonation_available", return_value=True):
+            _self_update(lambda level, msg: logs.append((level, msg)))
+    finally:
+        settings.YTDLP_ALLOW_NIGHTLY_UPDATE = original
+
+    assert calls == [False, True], "stable first, then nightly"
+    assert any("nightly" in m and "2026.8.4.234419" in m for _, m in logs)
+
+
+def test_self_update_nightly_failure_is_not_fatal():
+    settings = get_settings()
+    original = settings.YTDLP_ALLOW_NIGHTLY_UPDATE
+    settings.YTDLP_ALLOW_NIGHTLY_UPDATE = True
+    logs = []
+    try:
+        with patch("app.utils.ytdlp.get_version", return_value="2026.7.4"), patch(
+            "app.utils.ytdlp._pip_install",
+            side_effect=lambda spec, timeout, pre=False: None if pre else _completed(["pip"], 0),
+        ), patch("app.utils.ytdlp.impersonation_available", return_value=True):
+            _self_update(lambda level, msg: logs.append((level, msg)))  # must not raise
+    finally:
+        settings.YTDLP_ALLOW_NIGHTLY_UPDATE = original
+
+    assert any("nightly update failed" in m.lower() for _, m in logs)
+
+
+def test_impersonation_available_parses_real_target_listing():
+    """Verbatim shape of `yt-dlp --list-impersonate-targets` with curl_cffi
+    installed (captured from yt-dlp 2026.07.04)."""
+    listing = (
+        b"[info] Available impersonate targets\n"
+        b"Client          OS           Source\n"
+        b"--------------------------------------\n"
+        b"Chrome-133      Macos-15     curl_cffi\n"
+        b"Safari-18.0     Ios-18.0     curl_cffi\n"
+    )
+    with patch("app.utils.ytdlp._run", return_value=_completed(["yt-dlp"], 0, stdout=listing)):
+        assert impersonation_available() is True
+
+
+def test_impersonation_available_is_false_when_every_target_is_unavailable():
+    """Without curl_cffi yt-dlp still lists targets — each marked unavailable."""
+    listing = (
+        b"[info] Available impersonate targets\n"
+        b"Client          OS           Source\n"
+        b"--------------------------------------\n"
+        b"Chrome-133      Macos-15     (unavailable)\n"
+        b"Safari-18.0     Ios-18.0     (unavailable)\n"
+    )
+    with patch("app.utils.ytdlp._run", return_value=_completed(["yt-dlp"], 0, stdout=listing)):
+        assert impersonation_available() is False
+
+
+def test_impersonation_available_never_raises():
+    """It is a diagnostic; a broken probe must not break extraction."""
+    with patch("app.utils.ytdlp._run", side_effect=YtDlpError("download_failed", "no yt-dlp")):
+        assert impersonation_available() is False
 
 
 def test_extract_comments_failure_returns_typed_status_not_bare_empty():

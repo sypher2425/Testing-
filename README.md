@@ -509,6 +509,36 @@ version, and retries the extraction exactly once. If the update itself fails
 (no network, etc.) it's logged and the pinned version is used for that retry
 — an update failure never crashes the job or the worker.
 
+Extractor fixes for fast-moving sites (TikTok, Instagram) land on yt-dlp's
+**nightly** channel days before they reach stable, so when the stable upgrade
+reports "already the latest" and `YTDLP_ALLOW_NIGHTLY_UPDATE=true`, a nightly
+(`pip install --upgrade --pre yt-dlp`) is tried as well. It's off by default:
+nightlies are less tested, and reproducible builds are the norm — turn it on
+when a platform breaks and stable hasn't caught up yet.
+
+**TLS browser impersonation (required for TikTok).** TikTok serves anonymous
+requests a bot-check page with no embedded data, which yt-dlp reports as:
+
+```
+ERROR: [TikTok] 75...: Unable to extract universal data for rehydration
+```
+
+That message *looks* like an outdated extractor — it is not, and updating
+will not fix it. yt-dlp needs `curl_cffi` to impersonate a real browser's TLS
+fingerprint, which is why `requirements.txt` installs
+`yt-dlp[default,curl-cffi]` rather than plain `yt-dlp`. Verify it inside the
+worker with:
+
+```bash
+docker compose exec worker yt-dlp --list-impersonate-targets
+```
+
+Real rows (`Chrome-133  Macos-15  curl_cffi`) mean it's working; rows marked
+`(unavailable)` mean the extra is missing — rebuild the image
+(`docker compose build worker`). The worker probes this itself and logs an
+explicit warning when a failed extraction coincides with no available target,
+so the log points at the real cause instead of at the version number.
+
 **Cookies for account-gated fetches** (mainly Instagram view counts, which
 are often hidden from anonymous requests): drop a `cookies.txt` (exported
 from your browser) at `secrets/cookies.txt` — that directory is bind-mounted
@@ -601,6 +631,7 @@ See `.env.example` for the full annotated list. Highlights:
 | `ADAPTIVE_MIN_FRAMES` / `ADAPTIVE_MAX_FRAMES` | 30 / 150 | Bounds for adaptive mode's target frame count |
 | `RETENTION_HOURS` | 72 | Jobs + artifacts are deleted this many hours after completion by a periodic Celery task |
 | `YTDLP_COMMENT_LIMIT` | 100 | Top comments (by likes) saved per URL-ingested job (`MAX_COMMENTS` accepted as an alias) |
+| `YTDLP_ALLOW_NIGHTLY_UPDATE` | false | After a failed extraction, allow falling back to the yt-dlp nightly channel when stable is already current. Off by default (nightlies are less tested); worth enabling when TikTok/Instagram break |
 | `OPENING_DENSE_DURATION` / `OPENING_DENSE_INTERVAL` | 8 / 0.25 | Dense hook-analysis frames: one every INTERVAL seconds for the first DURATION seconds; per-job overridable, disable per job with `opening_dense_enabled=false` |
 | `COOKIES_FILE` | (unset) | In-container path to a cookies.txt for account-gated fetches — use `/run/secrets/cookies.txt` and drop the file at `secrets/cookies.txt` on the host; optional |
 | `STALE_JOB_TIMEOUT_MINUTES` | 30 | A *running* job with no heartbeat update for this long is marked `failed` (worker crash recovery) |

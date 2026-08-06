@@ -132,32 +132,97 @@ def get_version() -> str:
     return proc.stdout.decode(errors="replace").strip()
 
 
-def _self_update(log: callable) -> None:
-    """Attempt exactly one `pip install --upgrade yt-dlp`. Never raises —
-    an update failure just means we retry with whatever's already
-    installed (the pinned version), which is the correct fallback."""
-    old_version = get_version()
-    log("warning", f"yt-dlp extraction looked like a broken/outdated extractor (current version {old_version}); attempting a one-time self-update")
-    settings = get_settings()
-    try:
-        proc = subprocess.run(
-            ["pip", "install", "--upgrade", "yt-dlp"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=settings.YTDLP_UPDATE_TIMEOUT_SECONDS,
-        )
-        if proc.returncode != 0:
-            log("warning", f"yt-dlp self-update failed, continuing with pinned version {old_version}")
-            return
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        log("warning", f"yt-dlp self-update failed ({exc}), continuing with pinned version {old_version}")
-        return
+def impersonation_available() -> bool:
+    """True when yt-dlp has at least one usable impersonate target.
 
-    new_version = get_version()
-    if new_version == old_version:
-        log("info", f"yt-dlp self-update ran but version is unchanged ({old_version}) — already current")
+    TikTok's extractor relies on TLS browser-impersonation; without
+    curl_cffi installed, TikTok returns a bot-check page with no embedded
+    data and yt-dlp reports "Unable to extract universal data for
+    rehydration" — which looks like an outdated extractor but is not one.
+    """
+    try:
+        proc = _run(["--list-impersonate-targets"], timeout=30)
+    except Exception:  # noqa: BLE001 - diagnostics must never break extraction
+        return False
+    output = proc.stdout.decode(errors="replace")
+    # Output shape (yt-dlp 2026.07.04):
+    #   [info] Available impersonate targets
+    #   Client          OS           Source
+    #   --------------------------------------
+    #   Chrome-133      Macos-15     curl_cffi
+    # Targets are still listed when the backend that implements them is
+    # missing, but such rows are marked unavailable. Match on the "Source"
+    # column carrying an actual backend name rather than on line position:
+    # the header, the dashed rule and any [info]/[warning] lines must not
+    # be mistaken for a usable target.
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("[") or set(stripped) <= {"-"}:
+            continue
+        columns = stripped.split()
+        if len(columns) < 3 or columns[-1].lower() == "source":
+            continue
+        if "unavailable" in stripped.lower():
+            continue
+        return True
+    return False
+
+
+def _pip_install(spec: str, timeout: int, *, pre: bool = False) -> subprocess.CompletedProcess | None:
+    """Returns None when pip couldn't be run at all (missing or timed out)."""
+    args = ["pip", "install", "--upgrade"] + (["--pre"] if pre else []) + [spec]
+    try:
+        return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def _self_update(log: callable) -> None:
+    """Attempt one upgrade of yt-dlp. Never raises — a failed update just
+    means we retry with whatever's installed (the pinned version), which is
+    the correct fallback.
+
+    Extractor fixes for fast-moving sites land on the nightly channel days
+    before stable, so when stable is already current and
+    YTDLP_ALLOW_NIGHTLY_UPDATE is set, a nightly is tried as well."""
+    settings = get_settings()
+    old_version = get_version()
+    log(
+        "warning",
+        f"yt-dlp extraction looked like a broken/outdated extractor (current version "
+        f"{old_version}); attempting a one-time self-update",
+    )
+
+    proc = _pip_install("yt-dlp", settings.YTDLP_UPDATE_TIMEOUT_SECONDS)
+    if proc is None or proc.returncode != 0:
+        log("warning", f"yt-dlp self-update failed, continuing with pinned version {old_version}")
     else:
-        log("info", f"yt-dlp self-updated: {old_version} -> {new_version}")
+        new_version = get_version()
+        if new_version != old_version:
+            log("info", f"yt-dlp self-updated: {old_version} -> {new_version}")
+            return
+        log("info", f"yt-dlp self-update ran but version is unchanged ({old_version}) — already the latest stable")
+
+    if settings.YTDLP_ALLOW_NIGHTLY_UPDATE:
+        log("info", "Trying the yt-dlp nightly channel, where extractor fixes land first")
+        nightly = _pip_install("yt-dlp", settings.YTDLP_UPDATE_TIMEOUT_SECONDS, pre=True)
+        if nightly is None or nightly.returncode != 0:
+            log("warning", "yt-dlp nightly update failed; keeping the current version")
+        else:
+            nightly_version = get_version()
+            if nightly_version != old_version:
+                log("info", f"yt-dlp updated to nightly: {old_version} -> {nightly_version}")
+            else:
+                log("info", f"yt-dlp nightly is the same version ({old_version})")
+
+    if not impersonation_available():
+        log(
+            "warning",
+            "yt-dlp has no browser-impersonation target available (curl_cffi missing). "
+            "TikTok and some Instagram URLs need it and will keep failing with "
+            "'Unable to extract universal data for rehydration' until the image is "
+            "rebuilt with the curl-cffi extra.",
+        )
 
 
 def _run_with_extractor_retry(args: list[str], timeout: int, log: callable) -> subprocess.CompletedProcess:
