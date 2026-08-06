@@ -46,6 +46,11 @@ from app.utils.manifest_compat import normalize_frames
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 ALLOWED_EXTENSIONS = {"mp4", "mov", "mkv", "webm", "avi"}
+# Transcript mode only needs an audio track, so it accepts audio containers
+# the full dataset pipeline has no use for (there are no frames to extract
+# from an .mp3).
+AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus", "wma"}
+TRANSCRIBABLE_EXTENSIONS = ALLOWED_EXTENSIONS | AUDIO_EXTENSIONS
 
 _CONTENT_TYPES = {
     "jpg": "image/jpeg",
@@ -141,11 +146,11 @@ def _parse_events(events: str | None) -> list:
     return parsed
 
 
-def _validated_extension(filename: str) -> str:
+def _validated_extension(filename: str, allowed: set[str] = ALLOWED_EXTENSIONS) -> str:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if ext not in ALLOWED_EXTENSIONS:
+    if ext not in allowed:
         raise unprocessable(
-            f"Unsupported file extension '.{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+            f"Unsupported file extension '.{ext}'. Allowed: {', '.join(sorted(allowed))}",
         )
     return ext
 
@@ -199,20 +204,32 @@ def _persist_video_job(
     process_job.delay(job_id)
 
 
-async def _validate_uploaded_video(dest_path, storage: StorageBackend, job_id: str, settings: Settings) -> None:
-    """ffprobe the stored file, cleaning up the job dir if it isn't a video.
+async def _validate_uploaded_media(
+    dest_path,
+    storage: StorageBackend,
+    job_id: str,
+    settings: Settings,
+    *,
+    kind: str = "video",
+    require_video: bool = True,
+) -> None:
+    """ffprobe the stored file, cleaning up the job dir if it isn't media.
     Run in a worker thread: ffprobe is a blocking subprocess and a large file
     on a slow volume would otherwise stall the event loop (and the container
     healthcheck) for the duration."""
     try:
         await to_thread.run_sync(
-            lambda: ffprobe(str(dest_path), timeout=settings.FFPROBE_TIMEOUT_SECONDS)
+            lambda: ffprobe(
+                str(dest_path),
+                timeout=settings.FFPROBE_TIMEOUT_SECONDS,
+                require_video=require_video,
+            )
         )
     except FFmpegError as exc:
         storage.delete(job_id)
         raise unprocessable(
-            "File failed video validation (ffprobe could not read it). "
-            "It may be corrupt or not a real video file despite its extension.",
+            f"File failed {kind} validation (ffprobe could not read it). "
+            f"It may be corrupt or not a real {kind} file despite its extension.",
             exc.to_detail(),
         ) from exc
 
@@ -340,7 +357,7 @@ async def create_job_from_stream(
         storage.delete(job_id)
         raise bad_request("Uploaded file is empty")
 
-    await _validate_uploaded_video(dest_path, storage, job_id, settings)
+    await _validate_uploaded_media(dest_path, storage, job_id, settings)
 
     _persist_video_job(
         db,
@@ -508,7 +525,7 @@ async def create_job(
         storage.delete(job_id)
         raise bad_request("Uploaded file is empty")
 
-    await _validate_uploaded_video(dest_path, storage, job_id, settings)
+    await _validate_uploaded_media(dest_path, storage, job_id, settings)
 
     _persist_video_job(
         db,
@@ -588,6 +605,104 @@ def create_transcript_job(
         mode="transcript",
         source_url=url,
         options={"transcript": {**body.model_dump(mode="json"), "url": url}},
+        step_progress={},
+        last_heartbeat=datetime.now(timezone.utc),
+    )
+    db.add(job)
+    db.commit()
+
+    from app.tasks import process_job
+
+    process_job.delay(job_id)
+
+    return CreateJobResponse(job_id=job_id)
+
+
+@router.post("/transcript/upload", status_code=202, response_model=CreateJobResponse)
+async def create_transcript_job_from_stream(
+    request: Request,
+    filename: str = Query(..., description="Original filename; supplies the extension and display name"),
+    language: str | None = Query(None, max_length=8),
+    db: Session = Depends(db_session),
+    settings: Settings = Depends(get_settings),
+    storage: StorageBackend = Depends(get_storage),
+) -> CreateJobResponse:
+    """Transcribe a file you already have — the answer when a platform can't
+    be extracted at all: save the video yourself and drop it in.
+
+    Streams the raw body straight to disk like /api/jobs/upload (nothing is
+    buffered), then runs the transcript pipeline. Audio-only files are
+    accepted too: there are no frames to extract here, so an .mp3 is a
+    perfectly good input.
+    """
+    if not filename.strip():
+        raise bad_request("A filename query parameter is required")
+    ext = _validated_extension(filename, TRANSCRIBABLE_EXTENSIONS)
+
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    raw_length = request.headers.get("content-length")
+    declared_bytes = int(raw_length) if raw_length and raw_length.isdigit() else None
+    if declared_bytes is not None and declared_bytes > max_bytes:
+        raise payload_too_large(
+            f"Upload is {declared_bytes / (1024 * 1024):.0f}MB, which exceeds "
+            f"MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB}MB)."
+        )
+
+    try:
+        ensure_enough_disk(
+            str(settings.data_path), incoming_mb=(declared_bytes / (1024 * 1024)) if declared_bytes else 0.0
+        )
+    except ValueError as exc:
+        raise insufficient_storage(str(exc)) from exc
+
+    job_id = str(uuid.uuid4())
+    stored_source_filename = f"source.{ext}"
+    dest_path = storage.get(f"{job_id}/source/{stored_source_filename}")
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    hasher = hashlib.sha256()
+    total_bytes = 0
+
+    def write_chunk(out, chunk: bytes) -> None:
+        hasher.update(chunk)
+        out.write(chunk)
+
+    try:
+        with open(dest_path, "wb") as out:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    raise payload_too_large(
+                        f"Upload exceeds MAX_UPLOAD_MB ({settings.MAX_UPLOAD_MB}MB)"
+                    )
+                await to_thread.run_sync(write_chunk, out, chunk)
+    except BaseException:
+        storage.delete(job_id)
+        raise
+
+    if total_bytes == 0:
+        storage.delete(job_id)
+        raise bad_request("Uploaded file is empty")
+
+    # ffprobe here rather than in the worker so a file that isn't media at all
+    # is rejected at submit time, with the job dir cleaned up.
+    await _validate_uploaded_media(
+        dest_path, storage, job_id, settings, kind="media", require_video=False
+    )
+
+    job = Job(
+        id=job_id,
+        job_type="transcript",
+        original_filename=sanitize_filename(filename),
+        stored_source_filename=stored_source_filename,
+        status="queued",
+        current_step="queued",
+        mode="transcript",
+        options={"transcript": {"url": None, "source_preference": "whisper_only", "language": language}},
+        file_size_bytes=total_bytes,
+        source_sha256=hasher.hexdigest(),
         step_progress={},
         last_heartbeat=datetime.now(timezone.utc),
     )

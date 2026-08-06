@@ -1,4 +1,4 @@
-"""Transcript mode: paste any platform link, get a transcript.
+"""Transcript mode: a link or a file in, a transcript out.
 
 The cheap path first. Most platforms already carry a caption track, and
 downloading a VTT file costs a fraction of a second and no audio bytes at
@@ -17,6 +17,11 @@ Two deliberate constraints:
   needs no special case. Which source was used is recorded explicitly in
   `transcript_source` rather than being left for the reader to infer.
 
+An uploaded file skips all of that: it is already on disk and has no
+platform captions to ask for, so it goes straight to Whisper. That path also
+exists as the answer to a platform yt-dlp cannot currently extract — save the
+video yourself and drop it in.
+
 Step names are reused from the video pipeline (`fetching_source`,
 `loading_model`, `transcribing`, `generating_metadata`, `zipping`) so no new
 job states, status chips or progress labels are needed anywhere.
@@ -25,12 +30,14 @@ import json
 import tempfile
 from pathlib import Path
 
+from app.config import get_settings
 from app.pipeline.base import PipelineStep
 from app.pipeline.context import PipelineContext
 from app.pipeline.errors import PipelineFailedError
 from app.pipeline.steps.load_model import LoadWhisperModelStep
 from app.pipeline.steps.transcribe import TranscribeStep
 from app.utils.captions import subtitles_to_segments, subtitles_to_text
+from app.utils.ffmpeg import FFmpegError, ffprobe
 from app.utils.timestamps import now_utc_iso
 from app.utils.url_canonical import canonicalize
 from app.utils.ytdlp import (
@@ -50,6 +57,7 @@ SOURCE_WHISPER = "whisper"
 #: opt-outs — `captions_only` never downloads audio, `whisper_only` ignores
 #: any captions the platform offers (useful when they're known to be bad).
 PREFERENCES = ("captions_first", "captions_only", "whisper_only")
+
 
 def _caption_langs(requested: str | None) -> str:
     """yt-dlp --sub-langs selector. A requested language wins; otherwise
@@ -72,7 +80,12 @@ class TranscriptSourceStep(PipelineStep):
         params = ctx.options.get("transcript") or {}
         url = params.get("url")
         if not url:
-            raise PipelineFailedError("invalid_request", "Transcript mode requires a source URL")
+            # An uploaded file: already on disk, nothing to fetch. There is no
+            # platform and therefore no caption track, so this always goes to
+            # Whisper.
+            self._prepare_uploaded_file(ctx, params)
+            ctx.set_step_progress(self.name, 100)
+            return
 
         preference = params.get("source_preference") or "captions_first"
         language = params.get("language")
@@ -157,6 +170,67 @@ class TranscriptSourceStep(PipelineStep):
             f"({audio_path.stat().st_size / (1024 * 1024):.1f}MB)"
         )
         ctx.set_step_progress(self.name, 100)
+
+    def _prepare_uploaded_file(self, ctx: PipelineContext, params: dict) -> None:
+        """Set up the same shared state the URL path produces, from a file the
+        upload route already wrote to source/."""
+        stored = ctx.shared.get("stored_source_filename") or params.get("stored_source_filename")
+        if not stored:
+            raise PipelineFailedError(
+                "invalid_request", "Transcript mode requires either a source URL or an uploaded file"
+            )
+
+        rel = ctx.job_relative("source", stored)
+        source_path = ctx.storage.get(rel)
+        if not source_path.exists():
+            raise PipelineFailedError("source_missing", f"Uploaded file {stored} is no longer on disk")
+
+        ctx.shared["stored_source_filename"] = stored
+        ctx.shared["source_relative_path"] = rel
+
+        settings = get_settings()
+        try:
+            probe = ffprobe(
+                str(source_path), timeout=settings.FFPROBE_TIMEOUT_SECONDS, require_video=False
+            )
+        except FFmpegError as exc:
+            raise PipelineFailedError("probe_failed", exc.message, exc.to_detail()) from exc
+
+        if not probe.has_audio:
+            # For a full dataset job an audio-less video still yields frames,
+            # so transcription is skipped and the job succeeds. Here there is
+            # nothing else to produce, so an empty "success" would be a lie.
+            raise PipelineFailedError(
+                "no_audio_track",
+                "This file has no audio track, so there is nothing to transcribe.",
+            )
+
+        ctx.shared["video"] = {
+            "duration_seconds": probe.duration_seconds,
+            "has_audio": True,
+        }
+        ctx.shared["transcript_meta"] = {
+            "source_url": None,
+            "platform": "upload",
+            "title": ctx.shared.get("original_filename") or stored,
+            "uploader": None,
+            "upload_date": None,
+            "duration_seconds": probe.duration_seconds,
+            "fetched_at": now_utc_iso(),
+        }
+        # Persist what we actually measured. Leaving these null would make the
+        # API report "unknown" for facts this step just established.
+        ctx.update_job(
+            {
+                "duration_seconds": probe.duration_seconds,
+                "codec": probe.codec,
+                "has_audio": True,
+            }
+        )
+        ctx.info(
+            f"Transcribing an uploaded file: {stored} "
+            f"({probe.duration_seconds:.1f}s, codec={probe.codec})"
+        )
 
     def _try_captions(self, ctx: PipelineContext, url: str, metadata, language: str | None) -> bool:
         """Returns True when a usable caption track produced a transcript.

@@ -552,3 +552,248 @@ def test_full_transcript_pipeline_end_to_end_via_captions(db_session, storage):
     manifest = json.loads(storage.get(f"{job_id}/manifest.json").read_bytes())
     assert manifest["transcript"]["transcript_source"] == "platform_captions"
     assert manifest["transcript"]["segment_count"] == 3
+
+
+# ------------------------------------------------- transcript from a file
+
+
+def _probe(duration=4.0, has_audio=True):
+    from app.utils.ffmpeg import ProbeResult
+
+    return ProbeResult(
+        duration_seconds=duration, width=180, height=320, fps=30.0,
+        codec="h264", has_audio=has_audio, raw={},
+    )
+
+
+def test_uploaded_file_skips_ytdlp_entirely(tmp_path):
+    """The whole point of this path: it works when the platform doesn't."""
+    ctx, logs, shared_state = make_ctx(tmp_path, options={"transcript": {"url": None}})
+    ctx.storage.save_bytes(ctx.job_relative("source", "source.mp4"), b"fake media")
+    ctx.shared["stored_source_filename"] = "source.mp4"
+    ctx.shared["original_filename"] = "my clip.mp4"
+
+    with patch("app.pipeline.steps.transcript.ffprobe", return_value=_probe()), patch(
+        "app.pipeline.steps.transcript.extract_metadata"
+    ) as mock_meta, patch("app.pipeline.steps.transcript.download_captions") as mock_caps, patch(
+        "app.pipeline.steps.transcript.download_audio"
+    ) as mock_audio:
+        TranscriptSourceStep().run(ctx)
+
+    for mock in (mock_meta, mock_caps, mock_audio):
+        mock.assert_not_called()
+    assert ctx.shared["source_relative_path"].endswith("source.mp4")
+    assert ctx.shared["video"] == {"duration_seconds": 4.0, "has_audio": True}
+    assert ctx.shared["transcript_meta"]["platform"] == "upload"
+    assert ctx.shared["transcript_meta"]["title"] == "my clip.mp4"
+    assert "caption_transcript" not in ctx.shared
+
+
+def test_uploaded_file_with_no_audio_fails_instead_of_returning_an_empty_transcript(tmp_path):
+    """A full dataset job survives a silent video because frames still have
+    value. Here there is nothing else to produce, so success would be a lie."""
+    ctx, _, _ = make_ctx(tmp_path, options={"transcript": {"url": None}})
+    ctx.storage.save_bytes(ctx.job_relative("source", "source.mp4"), b"fake")
+    ctx.shared["stored_source_filename"] = "source.mp4"
+
+    with patch("app.pipeline.steps.transcript.ffprobe", return_value=_probe(has_audio=False)):
+        with pytest.raises(PipelineFailedError) as exc_info:
+            TranscriptSourceStep().run(ctx)
+
+    assert exc_info.value.code == "no_audio_track"
+    assert "nothing to transcribe" in exc_info.value.message
+
+
+def test_neither_a_url_nor_a_file_is_a_clear_error(tmp_path):
+    ctx, _, _ = make_ctx(tmp_path, options={"transcript": {"url": None}})
+    with pytest.raises(PipelineFailedError) as exc_info:
+        TranscriptSourceStep().run(ctx)
+    assert exc_info.value.code == "invalid_request"
+
+
+def test_unreadable_upload_fails_with_the_probe_detail(tmp_path):
+    from app.utils.ffmpeg import FFmpegError
+
+    ctx, _, _ = make_ctx(tmp_path, options={"transcript": {"url": None}})
+    ctx.storage.save_bytes(ctx.job_relative("source", "source.mp4"), b"not media")
+    ctx.shared["stored_source_filename"] = "source.mp4"
+
+    with patch(
+        "app.pipeline.steps.transcript.ffprobe",
+        side_effect=FFmpegError(
+            "ffprobe could not read the file", cmd=["ffprobe"], returncode=1, stderr="invalid data"
+        ),
+    ):
+        with pytest.raises(PipelineFailedError) as exc_info:
+            TranscriptSourceStep().run(ctx)
+    assert exc_info.value.code == "probe_failed"
+
+
+def test_upload_route_accepts_audio_only_files(client):
+    import io
+
+    with patch("app.api.routes.jobs.ffprobe", return_value=_probe()), patch(
+        "app.tasks.process_job.delay"
+    ) as mock_delay:
+        resp = client.post(
+            "/api/jobs/transcript/upload?filename=voice-memo.mp3",
+            content=b"fake audio bytes" * 100,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["job_id"]
+    mock_delay.assert_called_once_with(job_id)
+
+    body = client.get(f"/api/jobs/{job_id}").json()
+    assert body["job_type"] == "transcript"
+    assert body["original_filename"] == "voice-memo.mp3"
+    # No captions exist for a local file, so the preference is not a choice.
+    assert body["options"]["transcript"]["source_preference"] == "whisper_only"
+    assert body["options"]["transcript"]["url"] is None
+
+
+def test_upload_route_rejects_a_non_media_extension(client):
+    resp = client.post(
+        "/api/jobs/transcript/upload?filename=notes.pdf",
+        content=b"%PDF-1.4",
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 422
+    assert "mp3" in resp.json()["error"]["message"]
+
+
+def test_upload_route_rejects_an_empty_body_without_leaving_a_job_behind(client):
+    from app.database import get_session
+    from app.models import Job
+
+    before = get_session()
+    try:
+        count_before = before.query(Job).count()
+    finally:
+        before.close()
+
+    resp = client.post(
+        "/api/jobs/transcript/upload?filename=empty.mp4",
+        content=b"",
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 400
+
+    after = get_session()
+    try:
+        assert after.query(Job).count() == count_before
+    finally:
+        after.close()
+
+
+def test_upload_route_rejects_a_file_ffprobe_cannot_read(client, storage):
+    from app.utils.ffmpeg import FFmpegError
+
+    with patch(
+        "app.api.routes.jobs.ffprobe",
+        side_effect=FFmpegError(
+            "not media", cmd=["ffprobe"], returncode=1, stderr="invalid data"
+        ),
+    ):
+        resp = client.post(
+            "/api/jobs/transcript/upload?filename=fake.mp4",
+            content=b"definitely not a video",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+    assert resp.status_code == 422
+    assert "media validation" in resp.json()["error"]["message"]
+
+
+def test_uploaded_audio_file_runs_the_whole_pipeline(db_session, storage):
+    """A real .m4a through the real runner: real ffprobe, real ffmpeg WAV
+    extraction, real manifest and ZIP. Only the model weights are stubbed —
+    they need a network fetch, and they are not what this path changed.
+
+    The audio container matters: every other caller feeds these code paths an
+    .mp4, so an .m4a is genuinely new input for both ffprobe and
+    extract_audio_wav."""
+    import shutil
+    import subprocess
+    import uuid
+    import zipfile
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not available")
+
+    class _StubSegment:
+        def __init__(self, start, end, text):
+            self.start, self.end, self.text = start, end, text
+
+    class _StubInfo:
+        language = "en"
+
+    class _StubModel:
+        def transcribe(self, audio_path, **kwargs):
+            # Proves the step got a readable WAV out of the .m4a.
+            assert Path(audio_path).stat().st_size > 0
+            return iter([_StubSegment(0.0, 3.0, " a steady tone")]), _StubInfo()
+
+    job_id = str(uuid.uuid4())
+    dest = storage.get(f"{job_id}/source/source.m4a")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+         "-c:a", "aac", str(dest)],
+        check=True, capture_output=True,
+    )
+
+    from app.database import get_session
+    from app.models import Job
+    from app.pipeline.runner import run_pipeline
+
+    job = Job(
+        id=job_id,
+        job_type="transcript",
+        original_filename="voice-memo.m4a",
+        stored_source_filename="source.m4a",
+        status="queued",
+        mode="transcript",
+        options={"transcript": {"url": None, "source_preference": "whisper_only", "language": None}},
+        step_progress={},
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    with patch("app.pipeline.steps.load_model.load_whisper_model", return_value=_StubModel()):
+        run_pipeline(job_id)
+
+    session = get_session()
+    try:
+        refreshed = session.get(Job, job_id)
+        assert refreshed.status == "completed", refreshed.error_message
+        assert refreshed.duration_seconds and refreshed.duration_seconds > 2.5
+        assert refreshed.language == "en"
+    finally:
+        session.close()
+
+    transcript = json.loads(storage.get(f"{job_id}/transcript/transcript.json").read_bytes())
+    assert transcript["segments"][0]["text"] == "a steady tone"
+    assert transcript["transcript_source"] == "whisper"
+    assert transcript["caption_track"] is None
+
+    manifest = json.loads(storage.get(f"{job_id}/manifest.json").read_bytes())
+    assert manifest["source"]["platform"] == "upload"
+    assert manifest["source"]["source_url"] is None
+
+    with zipfile.ZipFile(storage.get(f"{job_id}/output.zip")) as zf:
+        names = set(zf.namelist())
+    assert "transcript/transcript.json" in names
+    assert not any(n.startswith(("frames/", "storyboards/")) for n in names)
+
+
+def test_uploaded_file_records_what_it_measured_rather_than_leaving_nulls(tmp_path):
+    ctx, _, shared_state = make_ctx(tmp_path, options={"transcript": {"url": None}})
+    ctx.storage.save_bytes(ctx.job_relative("source", "source.mp3"), b"fake")
+    ctx.shared["stored_source_filename"] = "source.mp3"
+
+    with patch("app.pipeline.steps.transcript.ffprobe", return_value=_probe(duration=5.04)):
+        TranscriptSourceStep().run(ctx)
+
+    assert shared_state["duration_seconds"] == 5.04
+    assert shared_state["has_audio"] is True
+    assert shared_state["codec"] == "h264"

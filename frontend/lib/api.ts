@@ -57,6 +57,8 @@ export const MAX_UPLOAD_MB = Number(process.env.NEXT_PUBLIC_MAX_UPLOAD_MB ?? 614
 export function formatFileSize(bytes: number): string {
   const mb = bytes / (1024 * 1024);
   if (mb >= 1024) return `${(mb / 1024).toFixed(2)} GB`;
+  // A short voice memo is a few hundred KB; "0.0 MB" reads like an empty file.
+  if (mb < 1) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${mb.toFixed(1)} MB`;
 }
 
@@ -129,11 +131,21 @@ export async function createJob(
     body = formData;
   }
 
+  return sendUpload(target, body, { raw: isFile, onProgress });
+}
+
+/** POST a body with upload progress. fetch() cannot report progress, so this
+ * stays on XMLHttpRequest — the only reason it exists. */
+function sendUpload(
+  target: string,
+  body: XMLHttpRequestBodyInit,
+  { raw, onProgress }: { raw: boolean; onProgress?: (percent: number) => void }
+): Promise<CreateJobResponse> {
   return new Promise<CreateJobResponse>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", target);
     xhr.responseType = "json";
-    if (isFile) {
+    if (raw) {
       // Opaque binary body — let the server treat it as raw bytes.
       xhr.setRequestHeader("Content-Type", "application/octet-stream");
     }
@@ -145,11 +157,11 @@ export async function createJob(
     };
 
     xhr.onload = () => {
-      const body = xhr.response as CreateJobResponse | ErrorEnvelope | null;
-      if (xhr.status >= 200 && xhr.status < 300 && body && "job_id" in body) {
-        resolve(body);
+      const payload = xhr.response as CreateJobResponse | ErrorEnvelope | null;
+      if (xhr.status >= 200 && xhr.status < 300 && payload && "job_id" in payload) {
+        resolve(payload);
       } else {
-        const envelope = body as ErrorEnvelope | null;
+        const envelope = payload as ErrorEnvelope | null;
         reject(
           new ApiError(
             xhr.status,
@@ -163,6 +175,21 @@ export async function createJob(
 
     xhr.onerror = () => reject(new ApiError(0, "network_error", "Network error during upload"));
     xhr.send(body);
+  });
+}
+
+/** Transcribe a file you already have — the way through when a platform
+ * can't be extracted at all. Audio-only files are accepted. */
+export function createTranscriptJobFromFile(
+  file: File,
+  language?: string,
+  onProgress?: (percent: number) => void
+): Promise<CreateJobResponse> {
+  const params = new URLSearchParams({ filename: file.name });
+  if (language) params.set("language", language);
+  return sendUpload(`${API_BASE_URL}/api/jobs/transcript/upload?${params.toString()}`, file, {
+    raw: true,
+    onProgress,
   });
 }
 

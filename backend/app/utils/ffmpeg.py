@@ -60,7 +60,12 @@ def _run(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
         ) from exc
 
 
-def ffprobe(path: str, timeout: int = 60) -> ProbeResult:
+def ffprobe(path: str, timeout: int = 60, *, require_video: bool = True) -> ProbeResult:
+    """require_video=False accepts an audio-only file (.mp3, .m4a, ...), for
+    transcript mode — there are no frames to extract there, so a missing video
+    stream is not a defect. width/height/fps come back None in that case, and
+    duration falls back to the container's own, since there is no video stream
+    to read it from."""
     cmd = [
         "ffprobe",
         "-v",
@@ -83,17 +88,25 @@ def ffprobe(path: str, timeout: int = 60) -> ProbeResult:
     streams = data.get("streams", [])
     video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
     audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
-    if video_stream is None:
+    if video_stream is None and require_video:
         raise FFmpegError(
             "No video stream found in the uploaded file.",
             cmd=cmd,
             returncode=proc.returncode,
             stderr="",
         )
+    if video_stream is None and audio_stream is None:
+        raise FFmpegError(
+            "The file contains neither a video nor an audio stream.",
+            cmd=cmd,
+            returncode=proc.returncode,
+            stderr="",
+        )
 
-    duration = float(data.get("format", {}).get("duration") or video_stream.get("duration") or 0.0)
+    primary = video_stream or audio_stream
+    duration = float(data.get("format", {}).get("duration") or primary.get("duration") or 0.0)
     fps = None
-    rate = video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate")
+    rate = (video_stream or {}).get("avg_frame_rate") or (video_stream or {}).get("r_frame_rate")
     if rate and rate != "0/0":
         num, _, den = rate.partition("/")
         try:
@@ -103,10 +116,10 @@ def ffprobe(path: str, timeout: int = 60) -> ProbeResult:
 
     return ProbeResult(
         duration_seconds=duration,
-        width=video_stream.get("width"),
-        height=video_stream.get("height"),
+        width=(video_stream or {}).get("width"),
+        height=(video_stream or {}).get("height"),
         fps=fps,
-        codec=video_stream.get("codec_name"),
+        codec=primary.get("codec_name"),
         has_audio=audio_stream is not None,
         raw=data,
     )

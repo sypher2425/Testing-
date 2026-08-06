@@ -454,6 +454,7 @@ All responses are JSON. Errors use a consistent envelope:
 |---|---|---|
 | POST | `/api/jobs/upload` | **Streaming upload for files (any size).** Raw file bytes as the request body; options as query params (`filename` required, plus `mode`, `interval_ms`, `target_frames`, `frame_format`, `frame_max_dim`, `manual_*`). Written straight to disk in chunks — nothing buffered. Returns `{ job_id }` (202). 413 if over `MAX_UPLOAD_MB`, 507 if disk is short. |
 | POST | `/api/jobs/transcript` | **Transcript only.** JSON `{ url, source_preference?, language? }`. Any platform yt-dlp supports; captions first, Whisper fallback. Returns `{ job_id }` (202). |
+| POST | `/api/jobs/transcript/upload` | **Transcript from a file.** Raw body, `filename` required (plus optional `language`). Accepts video *or* audio containers. Returns `{ job_id }` (202). |
 | POST | `/api/jobs` | Multipart: either `file` or `url` (exactly one), plus options (`mode`, `interval_ms`, `target_frames`, `frame_format`, `frame_max_dim`) and optional `manual_*` performance overrides. Returns `{ job_id }` (202) immediately. Use this for URL ingestion; prefer `/api/jobs/upload` for files. |
 | GET | `/api/jobs` | Paginated recent jobs |
 | GET | `/api/jobs/{id}` | Full job status + per-step progress + error detail |
@@ -594,7 +595,20 @@ downstream has to care which path ran. `transcript.json` records which one
 did, in `transcript_source` (`platform_captions` | `whisper`) and
 `caption_track` (`manual` | `automatic` | null) — stated, not inferred.
 
-**`source_preference`:**
+**From a file instead of a link.** The Transcript tab has a second sub-tab
+that takes a video *or audio* file directly (`POST /api/jobs/transcript/upload`,
+the same streaming raw-body upload the dataset pipeline uses). There is no
+platform involved, so it always runs Whisper.
+
+This is the way through when a platform can't be extracted at all — save the
+video yourself and drop it in. Audio-only files are accepted (`.mp3`, `.m4a`,
+`.wav`, `.flac`, `.ogg`, `.opus`, …): there are no frames to extract here, so
+an audio file is a perfectly good input. A file with **no** audio track fails
+with `no_audio_track` rather than returning an empty transcript — unlike a
+full dataset job, where a silent video still yields frames, there is nothing
+else to produce.
+
+**`source_preference`** (link only — a file has no captions to prefer):
 
 | Value | Behaviour |
 |---|---|
