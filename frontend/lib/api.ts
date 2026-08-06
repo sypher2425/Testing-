@@ -2,6 +2,7 @@ import type {
   CreateJobOptions,
   CreateJobResponse,
   CreateResearchJobParams,
+  CreateTranscriptJobParams,
   ErrorEnvelope,
   FrameListResponse,
   JobListResponse,
@@ -13,6 +14,7 @@ import type {
   ResearchManifest,
   StoryboardManifest,
   TranscriptJSON,
+  TranscriptManifest,
 } from "./types";
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -199,6 +201,11 @@ export async function getTranscript(
   return res.text();
 }
 
+/** Direct link to one transcript format, for download/open-in-tab. */
+export function transcriptUrl(jobId: string, format: "txt" | "json" | "srt"): string {
+  return `${API_BASE_URL}/api/jobs/${jobId}/transcript?format=${format}`;
+}
+
 export async function listFrames(
   jobId: string,
   page = 1,
@@ -231,6 +238,22 @@ export async function createResearchJob(params: CreateResearchJobParams): Promis
     body: JSON.stringify(params),
   });
   return handleResponse<CreateJobResponse>(res);
+}
+
+export async function createTranscriptJob(
+  params: CreateTranscriptJobParams,
+): Promise<CreateJobResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/jobs/transcript`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  return handleResponse<CreateJobResponse>(res);
+}
+
+export async function getTranscriptManifest(jobId: string): Promise<TranscriptManifest> {
+  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/manifest`, { cache: "no-store" });
+  return handleResponse<TranscriptManifest>(res);
 }
 
 export async function getResearchManifest(jobId: string): Promise<ResearchManifest> {

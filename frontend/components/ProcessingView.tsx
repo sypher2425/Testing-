@@ -6,6 +6,7 @@ import {
   PIPELINE_STEP_ORDER,
   RESEARCH_STEP_ORDER,
   TERMINAL_STATES,
+  TRANSCRIPT_STEP_ORDER,
   type JobStatusResponse,
 } from "@/lib/types";
 import JobLogPanel from "./JobLogPanel";
@@ -39,7 +40,12 @@ function formatElapsed(seconds: number): string {
 export default function ProcessingView({ job }: { job: JobStatusResponse }) {
   const elapsed = useElapsed(job.started_at, job.completed_at);
   const [cancelling, setCancelling] = useState(false);
-  const stepOrder = job.job_type === "research" ? RESEARCH_STEP_ORDER : PIPELINE_STEP_ORDER;
+  const stepOrder =
+    job.job_type === "research"
+      ? RESEARCH_STEP_ORDER
+      : job.job_type === "transcript"
+        ? TRANSCRIPT_STEP_ORDER
+        : PIPELINE_STEP_ORDER;
 
   async function handleCancel() {
     if (cancelling) return;

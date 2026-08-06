@@ -123,7 +123,7 @@ export type JobStatusValue =
   | "failed"
   | "cancelled";
 
-export type JobType = "video" | "research";
+export type JobType = "video" | "research" | "transcript";
 
 export interface JobStatusResponse {
   job_id: string;
@@ -327,6 +327,52 @@ export const RESEARCH_STEP_ORDER: { key: string; label: string }[] = [
   { key: "generating_metadata", label: "Generating research manifest" },
   { key: "zipping", label: "Building ZIP archive" },
 ];
+
+/** A strict subset of PIPELINE_STEP_ORDER, in the same order — transcript
+ * mode reuses the video pipeline's step names so there are no new statuses. */
+export const TRANSCRIPT_STEP_ORDER: { key: string; label: string }[] = [
+  { key: "fetching_source", label: "Fetching source" },
+  { key: "loading_model", label: "Loading transcription model" },
+  { key: "transcribing", label: "Transcribing" },
+  { key: "generating_metadata", label: "Generating manifest" },
+  { key: "zipping", label: "Building ZIP archive" },
+];
+
+export type TranscriptSourcePreference = "captions_first" | "captions_only" | "whisper_only";
+
+export interface CreateTranscriptJobParams {
+  url: string;
+  source_preference?: TranscriptSourcePreference;
+  language?: string;
+}
+
+/** manifest.json for a transcript job (schema_version "transcript-1.0"). */
+export interface TranscriptManifest {
+  schema_version: string;
+  job_type: "transcript";
+  source: {
+    source_url: string;
+    platform: string | null;
+    title: string | null;
+    uploader: string | null;
+    upload_date: string | null;
+    duration_seconds: number | null;
+    fetched_at: string | null;
+    requested_preference: string;
+    requested_language: string | null;
+  };
+  transcript: {
+    transcript_source: "platform_captions" | "whisper" | null;
+    caption_track: "manual" | "automatic" | null;
+    language: string | null;
+    segment_count: number;
+    first_segment_start_seconds: number | null;
+    last_segment_end_seconds: number | null;
+    duration_seconds: number | null;
+    word_count: number;
+  };
+  generated_at: string;
+}
 
 export interface CreateResearchJobParams {
   query: string;

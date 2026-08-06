@@ -4,6 +4,7 @@ import { useJobStatus } from "@/lib/useJobStatus";
 import ProcessingView from "@/components/ProcessingView";
 import ResearchResultsView from "@/components/ResearchResultsView";
 import ResultsView from "@/components/ResultsView";
+import TranscriptResultsView from "@/components/TranscriptResultsView";
 
 export default function JobPageClient({ jobId }: { jobId: string }) {
   const { job, error } = useJobStatus(jobId);
@@ -17,7 +18,9 @@ export default function JobPageClient({ jobId }: { jobId: string }) {
   }
 
   if (job.status === "completed") {
-    return job.job_type === "research" ? <ResearchResultsView job={job} /> : <ResultsView job={job} />;
+    if (job.job_type === "research") return <ResearchResultsView job={job} />;
+    if (job.job_type === "transcript") return <TranscriptResultsView job={job} />;
+    return <ResultsView job={job} />;
   }
 
   return <ProcessingView job={job} />;

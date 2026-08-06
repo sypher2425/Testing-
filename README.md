@@ -88,6 +88,12 @@ disk). For a pasted URL, this is where [URL ingestion](#url-ingestion-youtube-ti
 happens — metadata + video + comments via yt-dlp — before the rest of the
 pipeline runs exactly as it would for an uploaded file.
 
+Two other job types run shorter pipelines on the same machinery:
+[transcript mode](#transcript-mode-any-link--a-transcript) (`fetching_source →
+loading_model → transcribing → generating_metadata → zipping`) and
+[research mode](#research-mode-topic-search--transcript-bundle) (`searching →
+fetching_captions → generating_metadata → zipping`).
+
 Each step reports 0-100% progress; the API streams updates over Server-Sent
 Events (`GET /api/jobs/{id}/events`) with a polling fallback
 (`GET /api/jobs/{id}` on an interval). A Celery beat task periodically checks
@@ -447,6 +453,7 @@ All responses are JSON. Errors use a consistent envelope:
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/jobs/upload` | **Streaming upload for files (any size).** Raw file bytes as the request body; options as query params (`filename` required, plus `mode`, `interval_ms`, `target_frames`, `frame_format`, `frame_max_dim`, `manual_*`). Written straight to disk in chunks — nothing buffered. Returns `{ job_id }` (202). 413 if over `MAX_UPLOAD_MB`, 507 if disk is short. |
+| POST | `/api/jobs/transcript` | **Transcript only.** JSON `{ url, source_preference?, language? }`. Any platform yt-dlp supports; captions first, Whisper fallback. Returns `{ job_id }` (202). |
 | POST | `/api/jobs` | Multipart: either `file` or `url` (exactly one), plus options (`mode`, `interval_ms`, `target_frames`, `frame_format`, `frame_max_dim`) and optional `manual_*` performance overrides. Returns `{ job_id }` (202) immediately. Use this for URL ingestion; prefer `/api/jobs/upload` for files. |
 | GET | `/api/jobs` | Paginated recent jobs |
 | GET | `/api/jobs/{id}` | Full job status + per-step progress + error detail |
@@ -457,7 +464,7 @@ All responses are JSON. Errors use a consistent envelope:
 | GET | `/api/jobs/{id}/manifest` | Raw `manifest.json` |
 | GET | `/api/jobs/{id}/logs?since_id=` | Persisted per-job log lines (used by the Processing view) |
 | GET | `/api/jobs/{id}/video` | Source video with HTTP Range support, for the Results view's transcript-linked preview player |
-| GET | `/api/jobs/{id}/download?asset=zip\|transcript\|frames` | Download the full dataset or a subset |
+| GET | `/api/jobs/{id}/download?asset=zip\|transcript\|frames\|storyboards` | Download the full dataset or a subset. Research jobs accept `zip` only; transcript jobs accept `zip` or `transcript`. |
 | DELETE | `/api/jobs/{id}` | Cancel if running (revokes the Celery task) and delete all artifacts |
 
 ### Extraction modes
@@ -563,6 +570,56 @@ just falls back to anonymous requests rather than breaking every fetch.
 extraction attempt — including the previously-confusing case where the
 platform reports hundreds of comments but extraction returns zero
 (`reason: "zero_results_unexpected"`).
+
+## Transcript mode (any link → a transcript)
+
+The Home page's **Transcript only** tab takes one link from any site yt-dlp
+supports and returns just the transcript — no frames, no storyboards, and
+**the video stream is never downloaded**.
+
+It is built to be cheap. Most platforms already carry a caption track, and
+fetching a VTT file costs a fraction of a second and no media bytes at all,
+so the pipeline asks for captions before it asks for anything else:
+
+```
+fetching_source → loading_model → transcribing → generating_metadata → zipping
+```
+
+- **Captions found** → they are parsed into timed segments and the job is
+  essentially done. `loading_model` is skipped outright: there is no point
+  loading a ~460MB Whisper model to transcribe nothing.
+- **No captions** → only the audio is downloaded (`-f ba/bestaudio`, not the
+  video), and Whisper transcribes it as usual. On a long video that is the
+  difference between a few MB and a few GB.
+
+Either way the output is the same three files a video job produces —
+`transcript/transcript.json`, `transcript.txt`, `subtitles.srt` — served by
+the same `/api/jobs/{id}/transcript` endpoint. Platform captions are parsed
+into the same `{start, end, text}` segments Whisper emits, so nothing
+downstream has to care which path ran. `transcript.json` records which one
+did, in `transcript_source` (`platform_captions` | `whisper`) and
+`caption_track` (`manual` | `automatic` | null) — stated, not inferred.
+
+**`source_preference`:**
+
+| Value | Behaviour |
+|---|---|
+| `captions_first` (default) | Platform captions, Whisper fallback |
+| `captions_only` | Never downloads audio; fails with `captions_unavailable` if the link has no caption track |
+| `whisper_only` | Ignores platform captions entirely — useful when a platform's auto-captions are known to be bad |
+
+`language` is an optional ISO-639-1 hint for which caption track to request
+(`en`, `es`, `ja`, …). Whisper detects the language itself, so it only
+affects the captions path.
+
+`manifest.json` (`schema_version: "transcript-1.0"`) reports the transcript's
+own coverage — `first_segment_start_seconds`/`last_segment_end_seconds` —
+rather than assuming it spans the video: captions frequently stop early, and
+a silent tail is a real result. An empty transcript reports nulls, not zeros.
+
+The pipeline reuses the video pipeline's step names (a strict subset, in the
+same order), so transcript jobs need no new job states, status chips or
+progress labels.
 
 ## Research mode (topic search → transcript bundle)
 
