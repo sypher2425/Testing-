@@ -797,3 +797,16 @@ def test_uploaded_file_records_what_it_measured_rather_than_leaving_nulls(tmp_pa
     assert shared_state["duration_seconds"] == 5.04
     assert shared_state["has_audio"] is True
     assert shared_state["codec"] == "h264"
+
+
+def test_cookie_status_is_logged_once_not_twice(tmp_path):
+    """The step logs it, then extract_metadata logged it again — a duplicated
+    line in every URL job's log."""
+    ctx, logs, _ = make_ctx(tmp_path, options={"transcript": {"url": "https://x.test/v"}})
+    with patch("app.pipeline.steps.transcript.extract_metadata", return_value=_meta()), patch(
+        "app.pipeline.steps.transcript.download_captions",
+        side_effect=_write_caption_file(tmp_path, "123.en.vtt", VTT),
+    ):
+        TranscriptSourceStep().run(ctx)
+
+    assert sum(1 for _, m in logs if m.startswith("yt-dlp cookies:")) == 1

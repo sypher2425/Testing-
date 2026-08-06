@@ -597,3 +597,30 @@ def test_cookie_report_when_the_path_is_wrong(tmp_path):
         "present": False,
         "reason": "COOKIES_FILE is set but no file exists at that path",
     }
+
+
+def test_cookie_status_line_reports_age_so_staleness_is_visible_up_front(tmp_path):
+    """A rejected session produces the same empty page as a bot-check, so the
+    jar's age belongs in the log before anyone blames the extractor."""
+    import os
+    import time as _time
+
+    from app.utils.ytdlp import cookies_status
+
+    cookies = tmp_path / "c.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n.tiktok.com\tTRUE\t/\tTRUE\t1\tsessionid\tv\n")
+    settings = get_settings()
+    original = settings.COOKIES_FILE
+    settings.COOKIES_FILE = str(cookies)
+    try:
+        assert "days old" in cookies_status()
+        assert "may reject" not in cookies_status()
+
+        old = _time.time() - 90 * 86400
+        os.utime(cookies, (old, old))
+        stale = cookies_status()
+    finally:
+        settings.COOKIES_FILE = original
+
+    assert "90.0 days old" in stale
+    assert "may reject it" in stale

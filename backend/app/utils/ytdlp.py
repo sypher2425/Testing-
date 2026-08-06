@@ -414,10 +414,22 @@ def cookie_file_report() -> dict:
 
 
 def cookies_status() -> str:
+    """One line for the job log. Includes the export's age because a rejected
+    session is the failure mode that actually bites, and it looks identical to
+    a bot-check page — knowing the jar is two months old up front saves
+    diagnosing the extractor instead."""
     cookies_file = get_settings().COOKIES_FILE
     if not cookies_file:
         return "not configured"
-    return "in use" if Path(cookies_file).is_file() else f"configured ({cookies_file}) but file not found"
+    if not Path(cookies_file).is_file():
+        return f"configured ({cookies_file}) but file not found"
+
+    report = cookie_file_report()
+    age = report.get("modified_age_days")
+    if age is None:
+        return "in use"
+    suffix = " — old enough that TikTok may reject it" if report.get("likely_stale") else ""
+    return f"in use (export is {age} days old){suffix}"
 
 
 def extract_metadata(url: str, *, log: callable, log_cookie_status: bool = True) -> VideoMetadata:

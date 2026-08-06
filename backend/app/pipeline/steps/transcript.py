@@ -92,7 +92,8 @@ class TranscriptSourceStep(PipelineStep):
 
         ctx.info(f"yt-dlp cookies: {cookies_status()}")
         try:
-            metadata = extract_metadata(url, log=ctx.log)
+            # log_cookie_status=False: this step already logged it above.
+            metadata = extract_metadata(url, log=ctx.log, log_cookie_status=False)
         except YtDlpError as exc:
             ctx.error(f"yt-dlp metadata fetch failed [{exc.code}]: {exc.message}")
             if exc.stderr:
