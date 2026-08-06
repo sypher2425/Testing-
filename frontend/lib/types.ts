@@ -338,6 +338,21 @@ export const TRANSCRIPT_STEP_ORDER: { key: string; label: string }[] = [
   { key: "zipping", label: "Building ZIP archive" },
 ];
 
+/** Source-acquisition failures the user can route around by uploading the
+ * file themselves. Mirrors OFFER_MANUAL_UPLOAD in
+ * backend/app/utils/extraction_errors.py — a private video is deliberately
+ * absent, since uploading someone else's file is not a fix for it. */
+export const SOURCE_FAILURES_OFFERING_UPLOAD = new Set([
+  "tiktok_layout_changed",
+  "tiktok_bot_challenge",
+  "tiktok_cookie_invalid",
+  "tiktok_login_required",
+  "tiktok_region_restricted",
+  "tiktok_rate_limited",
+  "source_extraction_unknown",
+  "yt_dlp_update_required",
+]);
+
 export type TranscriptSourcePreference = "captions_first" | "captions_only" | "whisper_only";
 
 export interface CreateTranscriptJobParams {

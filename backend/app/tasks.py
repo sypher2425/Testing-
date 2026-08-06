@@ -280,6 +280,41 @@ def recover_interrupted_jobs() -> dict:
     return result
 
 
+def _log_extraction_environment() -> None:
+    """Apply the configured yt-dlp channel (if enabled) and log what the
+    worker actually ended up with, so a version question is answered by the
+    startup log rather than by guessing during an incident."""
+    from app.utils import ytdlp
+
+    def _log(level: str, message: str) -> None:
+        getattr(logger, level, logger.info)(message)
+
+    ytdlp.maybe_update_on_startup(_log)
+
+    settings = get_settings()
+    try:
+        version = ytdlp.get_version()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("yt-dlp is not usable: %s", exc)
+        return
+
+    targets = ytdlp.impersonate_targets()
+    logger.info(
+        "yt-dlp %s (channel=%s) | impersonation: %s | cookies: %s",
+        version,
+        settings.YTDLP_CHANNEL,
+        f"{len(targets)} targets" if targets else "UNAVAILABLE (curl_cffi missing)",
+        ytdlp.cookies_status(),
+    )
+    report = ytdlp.cookie_file_report()
+    if report.get("present") and report.get("likely_stale"):
+        logger.warning(
+            "The TikTok cookie file is %s days old and may be rejected; "
+            "a stale session looks identical to a bot-check page.",
+            report.get("modified_age_days"),
+        )
+
+
 def _warm_whisper_model() -> None:
     """Load the model at worker boot so a slow first download shows up in the
     worker log immediately instead of looking like a stuck job later."""
@@ -310,6 +345,15 @@ def _on_worker_ready(**_kwargs) -> None:
             )
     except Exception as exc:  # noqa: BLE001 - never block worker startup
         logger.error("Startup recovery failed: %s", exc)
+
+    # yt-dlp version management happens here, not inside jobs: a mid-job
+    # `pip install` swapped the binary under running work and never fixed the
+    # failure that triggered it. Synchronous on purpose — the worker should
+    # not start accepting extraction jobs while the tool is being replaced.
+    try:
+        _log_extraction_environment()
+    except Exception as exc:  # noqa: BLE001 - never block worker startup
+        logger.error("yt-dlp startup check failed: %s", exc)
 
     if settings.WARM_MODEL_ON_STARTUP:
         # Background thread so the worker starts accepting jobs immediately.

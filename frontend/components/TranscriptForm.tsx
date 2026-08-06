@@ -31,9 +31,13 @@ const PREFERENCES: { value: TranscriptSourcePreference; label: string; hint: str
 
 const ACCEPTED = ".mp4,.mov,.mkv,.webm,.avi,.mp3,.m4a,.wav,.aac,.flac,.ogg,.opus,.wma";
 
-export default function TranscriptForm() {
+export default function TranscriptForm({
+  initialTab = "link",
+}: {
+  initialTab?: "link" | "file";
+}) {
   const router = useRouter();
-  const [tab, setTab] = useState<"link" | "file">("link");
+  const [tab, setTab] = useState<"link" | "file">(initialTab);
   const [url, setUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [preference, setPreference] = useState<TranscriptSourcePreference>("captions_first");

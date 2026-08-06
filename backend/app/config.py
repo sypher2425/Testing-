@@ -108,16 +108,26 @@ class Settings(BaseSettings):
 
     # URL ingestion (yt-dlp)
     # The installed version is pinned in requirements.txt for reproducible
-    # builds. It is never auto-updated on startup; only on-demand, once, when
-    # an extraction fails in a way that looks like a broken/outdated
-    # extractor rather than a genuinely unavailable video (see app/utils/ytdlp.py).
+    # builds and is never updated during a job — see YTDLP_CHANNEL below.
     YTDLP_TIMEOUT_SECONDS: int = 1800
     YTDLP_METADATA_TIMEOUT_SECONDS: int = 120
     YTDLP_UPDATE_TIMEOUT_SECONDS: int = 120
-    # Extractor fixes for fast-moving sites (TikTok, Instagram) land on the
-    # yt-dlp nightly channel days before they reach stable. Off by default —
-    # nightlies are less tested — but worth enabling when a platform breaks.
-    YTDLP_ALLOW_NIGHTLY_UPDATE: bool = False
+    # Release channel: "stable" (pinned, reproducible) or "nightly" (extractor
+    # fixes for fast-moving sites land here first). Applied at startup or by an
+    # explicit admin action -- never during a user's job, which would swap the
+    # binary out from under running work.
+    YTDLP_CHANNEL: str = "stable"
+    # Update to YTDLP_CHANNEL when the worker boots. Off by default so a
+    # container's behaviour matches its pinned image; turn it on when you want
+    # long-running deployments to track a channel.
+    YTDLP_UPDATE_ON_STARTUP: bool = False
+    # TLS browser fingerprint to force on every request. Only applied when
+    # yt-dlp actually has the target available (curl_cffi installed) --
+    # passing it otherwise makes yt-dlp exit immediately.
+    YTDLP_IMPERSONATE_TARGET: str = "chrome"
+    # Pause before the one anonymous retry. Back-to-back requests after a
+    # challenge page are the fastest way to earn a rate limit.
+    YTDLP_RETRY_DELAY_SECONDS: float = 2.0
     # TikTok has two extraction paths: scraping the web page, and the mobile
     # API. yt-dlp only tries the API when it has app info — and without one of
     # these set, `_KNOWN_APP_INFO` is empty, so it goes straight to the web

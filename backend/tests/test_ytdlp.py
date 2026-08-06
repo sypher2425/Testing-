@@ -6,17 +6,22 @@ from unittest.mock import patch
 import pytest
 
 from app.config import get_settings
+from app.utils.extraction_errors import classify as _classify_full
 from app.utils.ytdlp import (
     YtDlpError,
-    _classify,
     _run,
     _run_with_extractor_retry,
-    _self_update,
     extract_comments,
     extract_metadata,
     fetch_profile_reel_view_count,
     impersonation_available,
+    update_to_channel,
 )
+
+
+def _classify(stderr: str, **kwargs) -> str:
+    """Category only — these tests predate the structured Classification."""
+    return _classify_full(stderr, **kwargs).code
 
 
 def _completed(cmd, returncode=0, stdout=b"", stderr=b""):
@@ -28,17 +33,17 @@ def _noop_log(level, message):
 
 
 def test_classify_video_unavailable():
-    assert _classify("ERROR: Private video. Sign in if you've been granted access.") == "video_unavailable"
-    assert _classify("ERROR: [youtube] abc123: This video is not available in your country") == "video_unavailable"
+    assert _classify("ERROR: Private video. Sign in if you've been granted access.") == "tiktok_video_private"
+    assert _classify("ERROR: [youtube] abc123: This video is not available in your country") == "tiktok_region_restricted"
 
 
 def test_classify_extractor_outdated():
-    assert _classify("ERROR: Unable to extract some info; please report this issue") == "extractor_outdated"
-    assert _classify("Unsupported URL: https://example.com/x") == "extractor_outdated"
+    assert _classify("ERROR: Unable to extract some info; please report this issue") == "yt_dlp_update_required"
+    assert _classify("Unsupported URL: https://example.com/x") == "yt_dlp_update_required"
 
 
 def test_classify_generic_download_failed():
-    assert _classify("ERROR: connection reset by peer") == "download_failed"
+    assert _classify("ERROR: connection reset by peer") == "tiktok_network_error"
 
 
 def test_extract_metadata_success():
@@ -68,183 +73,213 @@ def test_extract_metadata_success():
     assert meta.filesize_approx == 123456
 
 
-def test_extract_metadata_video_unavailable_does_not_trigger_self_update():
+def test_video_unavailable_is_terminal_and_never_retried_anonymously():
+    """Retrying a private video without cookies just burns a request against
+    a rate limiter — the video state is not an access problem."""
     fake_proc = _completed(["yt-dlp"], returncode=1, stderr=b"ERROR: Private video")
-    with patch("app.utils.ytdlp._run", return_value=fake_proc), patch(
-        "app.utils.ytdlp._self_update"
-    ) as mock_update:
+    with patch("app.utils.ytdlp._run", return_value=fake_proc) as mock_run, patch(
+        "app.utils.ytdlp.cookies_configured", return_value=True
+    ):
         with pytest.raises(YtDlpError) as exc_info:
             extract_metadata("https://youtu.be/private", log=_noop_log)
-    assert exc_info.value.code == "video_unavailable"
-    mock_update.assert_not_called()
+    assert exc_info.value.code == "tiktok_video_private"
+    assert mock_run.call_count == 1
 
 
-def test_run_with_extractor_retry_self_updates_and_succeeds_on_retry():
-    first_fail = _completed(["yt-dlp"], returncode=1, stderr=b"ERROR: Unable to extract; please report this issue")
-    second_success = _completed(["yt-dlp"], returncode=0, stdout=b'{"ok": true}')
-
-    with patch("app.utils.ytdlp._run", side_effect=[first_fail, second_success]), patch(
-        "app.utils.ytdlp._self_update"
-    ) as mock_update:
-        result = _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
-
-    assert result is second_success
-    mock_update.assert_called_once()
+# ------------------------------------------------------- the attempt matrix
 
 
-def test_run_with_extractor_retry_gives_up_after_failed_retry():
-    fail = _completed(["yt-dlp"], returncode=1, stderr=b"ERROR: Unable to extract; please report this issue")
+def test_bot_challenge_with_cookies_retries_once_anonymously_and_succeeds():
+    """The reported failure shape: cookies in use, TikTok returns a page with
+    no embedded data. If dropping the cookies fixes it, the cookies were the
+    problem — and the log must say so instead of blaming the extractor."""
+    blocked = _completed(
+        ["yt-dlp"], returncode=1,
+        stderr=b"ERROR: [TikTok] 123: Unable to extract universal data for rehydration",
+    )
+    success = _completed(["yt-dlp"], returncode=0, stdout=b'{"id": "123"}')
+    calls = []
 
-    with patch("app.utils.ytdlp._run", side_effect=[fail, fail]), patch("app.utils.ytdlp._self_update"):
+    def fake_run(args, timeout, *, use_cookies=True, impersonate=None):
+        calls.append(use_cookies)
+        return blocked if use_cookies else success
+
+    logs = []
+    with patch("app.utils.ytdlp._run", side_effect=fake_run), patch(
+        "app.utils.ytdlp.cookies_configured", return_value=True
+    ), patch("app.utils.ytdlp.time.sleep"):
+        result = _run_with_extractor_retry(
+            ["--dump-single-json", "url"], timeout=30, log=lambda l, m: logs.append((l, m))
+        )
+
+    assert calls == [True, False], "exactly one authenticated then one anonymous attempt"
+    assert result is success
+    assert any("cookies are stale or rejected" in m for _, m in logs)
+
+
+def test_attempts_are_bounded_at_two():
+    """TikTok rate-limits aggressively; hammering turns a recoverable failure
+    into a durable block."""
+    blocked = _completed(
+        ["yt-dlp"], returncode=1,
+        stderr=b"ERROR: [TikTok] 123: Unable to extract universal data for rehydration",
+    )
+    with patch("app.utils.ytdlp._run", return_value=blocked) as mock_run, patch(
+        "app.utils.ytdlp.cookies_configured", return_value=True
+    ), patch("app.utils.ytdlp.time.sleep"):
+        with pytest.raises(YtDlpError):
+            _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
+    assert mock_run.call_count == 2
+
+
+def test_both_attempts_blocked_points_at_the_server_not_the_cookies():
+    """Identical failure with and without cookies rules the cookies out. That
+    conclusion is unavailable from stderr alone."""
+    blocked = _completed(
+        ["yt-dlp"], returncode=1,
+        stderr=b"ERROR: [TikTok] 123: Unable to extract universal data for rehydration",
+    )
+    with patch("app.utils.ytdlp._run", return_value=blocked), patch(
+        "app.utils.ytdlp.cookies_configured", return_value=True
+    ), patch("app.utils.ytdlp.time.sleep"):
         with pytest.raises(YtDlpError) as exc_info:
             _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
-    assert exc_info.value.code == "extractor_outdated"
+
+    assert exc_info.value.code == "tiktok_region_restricted"
+    assert "region or IP address" in exc_info.value.message
 
 
-def test_self_update_success_logs_old_and_new_version():
-    logs = []
-    with patch("app.utils.ytdlp.get_version", side_effect=["2026.1.1", "2026.7.4"]), patch(
-        "app.utils.ytdlp.subprocess.run",
-        return_value=_completed(["pip"], returncode=0),
+def test_no_anonymous_retry_when_no_cookies_were_used():
+    """Without cookies there is nothing to drop, so a second identical attempt
+    would be pure noise."""
+    blocked = _completed(
+        ["yt-dlp"], returncode=1,
+        stderr=b"ERROR: [TikTok] 123: Unable to extract universal data for rehydration",
+    )
+    with patch("app.utils.ytdlp._run", return_value=blocked) as mock_run, patch(
+        "app.utils.ytdlp.cookies_configured", return_value=False
     ):
-        _self_update(lambda level, msg: logs.append((level, msg)))
+        with pytest.raises(YtDlpError) as exc_info:
+            _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
+    assert mock_run.call_count == 1
+    assert exc_info.value.code == "tiktok_layout_changed"
 
-    combined = " ".join(m for _, m in logs)
-    assert "2026.1.1" in combined
-    assert "2026.7.4" in combined
+
+def test_no_pip_install_ever_happens_during_a_job():
+    """A mid-job update swapped the binary under running work and never fixed
+    the failure that triggered it."""
+    blocked = _completed(
+        ["yt-dlp"], returncode=1,
+        stderr=b"ERROR: Unable to extract; please report this issue. Confirm you are on "
+               b"the latest version using yt-dlp -U",
+    )
+    with patch("app.utils.ytdlp._run", return_value=blocked), patch(
+        "app.utils.ytdlp.cookies_configured", return_value=False
+    ), patch("app.utils.ytdlp._pip_install") as mock_pip:
+        with pytest.raises(YtDlpError):
+            _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
+    mock_pip.assert_not_called()
 
 
-def test_self_update_pip_failure_falls_back_without_raising():
-    logs = []
-    with patch("app.utils.ytdlp.get_version", return_value="2026.1.1"), patch(
-        "app.utils.ytdlp.subprocess.run",
-        return_value=_completed(["pip"], returncode=1, stderr=b"network error"),
+def test_impersonation_is_forced_when_a_target_is_available():
+    captured = {}
+
+    def fake_run(args, timeout, *, use_cookies=True, impersonate=None):
+        captured["impersonate"] = impersonate
+        return _completed(["yt-dlp"], returncode=0, stdout=b"{}")
+
+    with patch("app.utils.ytdlp._run", side_effect=fake_run), patch(
+        "app.utils.ytdlp.impersonation_available", return_value=True
     ):
-        _self_update(lambda level, msg: logs.append((level, msg)))  # must not raise
+        _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
+    assert captured["impersonate"] == "chrome"
 
-    assert any("failed" in m.lower() for _, m in logs)
 
+def test_impersonation_is_not_forced_when_unavailable():
+    """Passing --impersonate with no curl_cffi makes yt-dlp exit immediately,
+    turning a recoverable extraction into a hard failure."""
+    captured = {}
 
-def test_self_update_pip_timeout_falls_back_without_raising():
-    logs = []
-    with patch("app.utils.ytdlp.get_version", return_value="2026.1.1"), patch(
-        "app.utils.ytdlp.subprocess.run",
-        side_effect=subprocess.TimeoutExpired(cmd=["pip"], timeout=120),
+    def fake_run(args, timeout, *, use_cookies=True, impersonate=None):
+        captured["impersonate"] = impersonate
+        return _completed(["yt-dlp"], returncode=0, stdout=b"{}")
+
+    with patch("app.utils.ytdlp._run", side_effect=fake_run), patch(
+        "app.utils.ytdlp.impersonation_available", return_value=False
     ):
-        _self_update(lambda level, msg: logs.append((level, msg)))  # must not raise
-
-    assert any("failed" in m.lower() for _, m in logs)
-
-
-def test_self_update_warns_when_no_impersonation_target_is_available():
-    """When an extractor asks to impersonate a browser and no target exists,
-    the log has to name that, or the missing dependency is invisible."""
-    logs = []
-    with patch("app.utils.ytdlp.get_version", return_value="2026.7.4"), patch(
-        "app.utils.ytdlp._pip_install", return_value=_completed(["pip"], returncode=0)
-    ), patch("app.utils.ytdlp.impersonation_available", return_value=False):
-        _self_update(lambda level, msg: logs.append((level, msg)))
-
-    combined = " ".join(m for _, m in logs)
-    assert "unchanged" in combined
-    assert "curl_cffi" in combined
-    assert any(level == "warning" and "impersonation" in msg for level, msg in logs)
+        _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
+    assert captured["impersonate"] is None
 
 
-def test_self_update_stays_quiet_about_impersonation_when_it_works():
-    logs = []
-    with patch("app.utils.ytdlp.get_version", return_value="2026.7.4"), patch(
-        "app.utils.ytdlp._pip_install", return_value=_completed(["pip"], returncode=0)
+def test_run_passes_impersonate_and_omits_cookies_when_asked(tmp_path):
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n")
+    captured: list[str] = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        captured.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"{}", stderr=b"")
+
+    settings = get_settings()
+    original = settings.COOKIES_FILE
+    settings.COOKIES_FILE = str(cookies)
+    try:
+        with patch("app.utils.ytdlp.subprocess.run", side_effect=fake_subprocess_run):
+            _run(["--dump-single-json", "url"], timeout=30, use_cookies=False, impersonate="chrome")
+    finally:
+        settings.COOKIES_FILE = original
+
+    assert "--cookies" not in captured
+    assert captured[captured.index("--impersonate") + 1] == "chrome"
+
+
+# ------------------------------------------------------------ channel update
+
+
+def test_update_to_channel_uses_the_prerelease_flag_for_nightly():
+    calls = []
+    with patch("app.utils.ytdlp.get_version", side_effect=["2026.7.4", "2026.8.4.dev0"]), patch(
+        "app.utils.ytdlp._pip_install",
+        side_effect=lambda spec, timeout, pre=False: calls.append((spec, pre))
+        or _completed(["pip"], returncode=0),
     ), patch("app.utils.ytdlp.impersonation_available", return_value=True):
-        _self_update(lambda level, msg: logs.append((level, msg)))
+        result = update_to_channel("nightly", _noop_log)
 
-    assert not any("curl_cffi" in m for _, m in logs)
+    assert calls == [("yt-dlp[default,curl-cffi]", True)]
+    assert result == {"ok": True, "channel": "nightly", "before": "2026.7.4", "after": "2026.8.4.dev0"}
 
 
-def test_self_update_skips_the_nightly_channel_by_default():
+def test_update_to_channel_stable_does_not_use_prerelease():
     calls = []
     with patch("app.utils.ytdlp.get_version", return_value="2026.7.4"), patch(
         "app.utils.ytdlp._pip_install",
         side_effect=lambda spec, timeout, pre=False: calls.append(pre)
         or _completed(["pip"], returncode=0),
     ), patch("app.utils.ytdlp.impersonation_available", return_value=True):
-        _self_update(_noop_log)
+        update_to_channel("stable", _noop_log)
+    assert calls == [False]
 
-    assert calls == [False], "nightly must be opt-in"
+
+def test_update_failure_is_never_fatal():
+    with patch("app.utils.ytdlp.get_version", return_value="2026.7.4"), patch(
+        "app.utils.ytdlp._pip_install", return_value=None
+    ):
+        result = update_to_channel("stable", _noop_log)  # must not raise
+    assert result["ok"] is False
 
 
-def test_self_update_tries_the_nightly_channel_when_enabled():
-    """Extractor fixes for TikTok/Instagram land on nightly days before
-    stable, so an operator can opt in when a platform breaks."""
-    calls = []
+def test_startup_update_is_skipped_unless_enabled():
+    from app.utils.ytdlp import maybe_update_on_startup
+
     settings = get_settings()
-    original = settings.YTDLP_ALLOW_NIGHTLY_UPDATE
-    settings.YTDLP_ALLOW_NIGHTLY_UPDATE = True
-    logs = []
+    original = settings.YTDLP_UPDATE_ON_STARTUP
+    settings.YTDLP_UPDATE_ON_STARTUP = False
     try:
-        with patch(
-            "app.utils.ytdlp.get_version", side_effect=["2026.7.4", "2026.7.4", "2026.8.4.234419"]
-        ), patch(
-            "app.utils.ytdlp._pip_install",
-            side_effect=lambda spec, timeout, pre=False: calls.append(pre)
-            or _completed(["pip"], returncode=0),
-        ), patch("app.utils.ytdlp.impersonation_available", return_value=True):
-            _self_update(lambda level, msg: logs.append((level, msg)))
+        with patch("app.utils.ytdlp._pip_install") as mock_pip:
+            assert maybe_update_on_startup(_noop_log) is None
+        mock_pip.assert_not_called()
     finally:
-        settings.YTDLP_ALLOW_NIGHTLY_UPDATE = original
-
-    assert calls == [False, True], "stable first, then nightly"
-    assert any("nightly" in m and "2026.8.4.234419" in m for _, m in logs)
-
-
-def test_self_update_nightly_failure_is_not_fatal():
-    settings = get_settings()
-    original = settings.YTDLP_ALLOW_NIGHTLY_UPDATE
-    settings.YTDLP_ALLOW_NIGHTLY_UPDATE = True
-    logs = []
-    try:
-        with patch("app.utils.ytdlp.get_version", return_value="2026.7.4"), patch(
-            "app.utils.ytdlp._pip_install",
-            side_effect=lambda spec, timeout, pre=False: None if pre else _completed(["pip"], 0),
-        ), patch("app.utils.ytdlp.impersonation_available", return_value=True):
-            _self_update(lambda level, msg: logs.append((level, msg)))  # must not raise
-    finally:
-        settings.YTDLP_ALLOW_NIGHTLY_UPDATE = original
-
-    assert any("nightly update failed" in m.lower() for _, m in logs)
-
-
-def test_impersonation_available_parses_real_target_listing():
-    """Verbatim shape of `yt-dlp --list-impersonate-targets` with curl_cffi
-    installed (captured from yt-dlp 2026.07.04)."""
-    listing = (
-        b"[info] Available impersonate targets\n"
-        b"Client          OS           Source\n"
-        b"--------------------------------------\n"
-        b"Chrome-133      Macos-15     curl_cffi\n"
-        b"Safari-18.0     Ios-18.0     curl_cffi\n"
-    )
-    with patch("app.utils.ytdlp._run", return_value=_completed(["yt-dlp"], 0, stdout=listing)):
-        assert impersonation_available() is True
-
-
-def test_impersonation_available_is_false_when_every_target_is_unavailable():
-    """Without curl_cffi yt-dlp still lists targets — each marked unavailable."""
-    listing = (
-        b"[info] Available impersonate targets\n"
-        b"Client          OS           Source\n"
-        b"--------------------------------------\n"
-        b"Chrome-133      Macos-15     (unavailable)\n"
-        b"Safari-18.0     Ios-18.0     (unavailable)\n"
-    )
-    with patch("app.utils.ytdlp._run", return_value=_completed(["yt-dlp"], 0, stdout=listing)):
-        assert impersonation_available() is False
-
-
-def test_impersonation_available_never_raises():
-    """It is a diagnostic; a broken probe must not break extraction."""
-    with patch("app.utils.ytdlp._run", side_effect=YtDlpError("download_failed", "no yt-dlp")):
-        assert impersonation_available() is False
+        settings.YTDLP_UPDATE_ON_STARTUP = original
 
 
 def test_extract_comments_failure_returns_typed_status_not_bare_empty():
@@ -412,63 +447,6 @@ def test_fetch_profile_reel_view_count_no_username_returns_none_without_calling_
 # ------------------------------------------------- TikTok mobile API path
 
 
-def test_tiktok_rehydration_is_not_classified_as_an_outdated_extractor():
-    """yt-dlp's own text says "confirm you are on the latest version", which
-    is misleading: the extractor is current and updating does not fix it."""
-    stderr = (
-        "ERROR: [TikTok] 7666486121907358978: Unable to extract universal data for "
-        "rehydration; please report this issue on https://github.com/yt-dlp/yt-dlp/issues"
-        "?q= , filling out the appropriate issue template. Confirm you are on the "
-        "latest version using yt-dlp -U"
-    )
-    assert _classify(stderr) == "tiktok_web_blocked"
-
-
-def test_tiktok_web_block_does_not_waste_a_self_update():
-    from app.utils.ytdlp import TIKTOK_WEB_BLOCKED_MESSAGE
-
-    fail = _completed(
-        ["yt-dlp"], returncode=1,
-        stderr=b"ERROR: [TikTok] 123: Unable to extract universal data for rehydration",
-    )
-    settings = get_settings()
-    original = settings.TIKTOK_DEVICE_ID
-    settings.TIKTOK_DEVICE_ID = ""
-    try:
-        with patch("app.utils.ytdlp._run", return_value=fail), patch(
-            "app.utils.ytdlp._self_update"
-        ) as mock_update:
-            with pytest.raises(YtDlpError) as exc_info:
-                _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
-    finally:
-        settings.TIKTOK_DEVICE_ID = original
-
-    mock_update.assert_not_called()
-    assert exc_info.value.code == "tiktok_web_blocked"
-    assert exc_info.value.message == TIKTOK_WEB_BLOCKED_MESSAGE
-    assert "TIKTOK_DEVICE_ID" in exc_info.value.message
-
-
-def test_tiktok_web_block_with_a_device_id_already_set_says_something_different():
-    """Repeating "set TIKTOK_DEVICE_ID" to someone who already has one set is
-    the same unhelpful loop as "update yt-dlp"."""
-    fail = _completed(
-        ["yt-dlp"], returncode=1,
-        stderr=b"ERROR: [TikTok] 123: Unable to extract universal data for rehydration",
-    )
-    settings = get_settings()
-    original = settings.TIKTOK_DEVICE_ID
-    settings.TIKTOK_DEVICE_ID = "1234567890123456789"
-    try:
-        with patch("app.utils.ytdlp._run", return_value=fail):
-            with pytest.raises(YtDlpError) as exc_info:
-                _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
-    finally:
-        settings.TIKTOK_DEVICE_ID = original
-
-    assert "stale or rejected" in exc_info.value.message
-
-
 def test_device_id_is_passed_to_yt_dlp_as_an_extractor_arg():
     """Without app info of some kind, yt-dlp never attempts TikTok's mobile
     API at all — it goes straight to the web page that is being blocked."""
@@ -527,3 +505,95 @@ def test_raw_extractor_args_passthrough_supports_several_specs():
         "--extractor-args", "tiktok:app_info=123",
         "--extractor-args", "youtube:player_client=web",
     ], "blank segments from trailing/extra semicolons must not become empty flags"
+
+
+def test_impersonation_probe_is_cached_not_re_run_per_extraction():
+    """It is a property of the installed binary, consulted on every job."""
+    from app.utils.ytdlp import impersonation_available as probe
+
+    probe.cache_clear()
+    listing = (
+        b"[info] Available impersonate targets\n"
+        b"Client          OS           Source\n"
+        b"--------------------------------------\n"
+        b"Chrome-133      Macos-15     curl_cffi\n"
+    )
+    with patch("app.utils.ytdlp._run", return_value=_completed(["yt-dlp"], 0, stdout=listing)) as m:
+        assert probe() is True
+        assert probe() is True
+        assert probe() is True
+    assert m.call_count == 1
+    probe.cache_clear()
+
+
+# ------------------------------------------------------ cookie diagnostics
+
+
+def test_cookie_report_describes_shape_and_age_but_never_contents(tmp_path):
+    from app.utils.ytdlp import cookie_file_report
+
+    cookies = tmp_path / "cookies.txt"
+    secret = "SUPERSECRETSESSIONVALUE"
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n"
+        f".tiktok.com\tTRUE\t/\tTRUE\t1799999999\tsessionid\t{secret}\n"
+        ".tiktok.com\tTRUE\t/\tTRUE\t1799999999\tttwid\tanother-value\n"
+    )
+    settings = get_settings()
+    original = settings.COOKIES_FILE
+    settings.COOKIES_FILE = str(cookies)
+    try:
+        report = cookie_file_report()
+    finally:
+        settings.COOKIES_FILE = original
+
+    assert report["present"] is True
+    assert report["netscape_format"] is True
+    assert report["has_tiktok_entries"] is True
+    assert report["tiktok_session_cookies_present"] == ["sessionid", "ttwid"]
+    assert report["entry_count"] == 2
+    assert report["modified_age_days"] < 1
+    assert report["likely_stale"] is False
+    # The whole point: no values anywhere in the payload.
+    assert secret not in json.dumps(report)
+    assert "another-value" not in json.dumps(report)
+
+
+def test_cookie_report_flags_a_stale_export(tmp_path):
+    import os
+    import time as _time
+
+    from app.utils.ytdlp import cookie_file_report
+
+    cookies = tmp_path / "old.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n.tiktok.com\tTRUE\t/\tTRUE\t1\tsessionid\tv\n")
+    old = _time.time() - 60 * 86400
+    os.utime(cookies, (old, old))
+
+    settings = get_settings()
+    original = settings.COOKIES_FILE
+    settings.COOKIES_FILE = str(cookies)
+    try:
+        report = cookie_file_report()
+    finally:
+        settings.COOKIES_FILE = original
+
+    assert report["likely_stale"] is True
+    assert report["modified_age_days"] >= 59
+
+
+def test_cookie_report_when_the_path_is_wrong(tmp_path):
+    from app.utils.ytdlp import cookie_file_report
+
+    settings = get_settings()
+    original = settings.COOKIES_FILE
+    settings.COOKIES_FILE = str(tmp_path / "nope.txt")
+    try:
+        report = cookie_file_report()
+    finally:
+        settings.COOKIES_FILE = original
+    assert report == {
+        "configured": True,
+        "present": False,
+        "reason": "COOKIES_FILE is set but no file exists at that path",
+    }

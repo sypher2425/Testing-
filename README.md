@@ -518,11 +518,9 @@ version, and retries the extraction exactly once. If the update itself fails
 — an update failure never crashes the job or the worker.
 
 Extractor fixes for fast-moving sites (TikTok, Instagram) land on yt-dlp's
-**nightly** channel days before they reach stable, so when the stable upgrade
-reports "already the latest" and `YTDLP_ALLOW_NIGHTLY_UPDATE=true`, a nightly
-(`pip install --upgrade --pre yt-dlp`) is tried as well. It's off by default:
-nightlies are less tested, and reproducible builds are the norm — turn it on
-when a platform breaks and stable hasn't caught up yet.
+**nightly** channel days before they reach stable. Set `YTDLP_CHANNEL=nightly`
+with `YTDLP_UPDATE_ON_STARTUP=true` to track it; the update runs at worker
+boot, never inside a job.
 
 **TLS browser impersonation.** Several extractors ask to impersonate a real
 browser's TLS fingerprint, which needs `curl_cffi` — hence
@@ -681,9 +679,57 @@ removes one. Two things worth knowing:
   bot-checked from another, which is why upstream labels the issue
   `cant-reproduce`.
 
-Because the "update yt-dlp" advice is actively misleading, this failure gets
-its own error code (`tiktok_web_blocked`) rather than `extractor_outdated`,
-and the worker does **not** waste a self-update attempt on it.
+#### How an extraction failure is actually diagnosed
+
+yt-dlp funnels wildly different situations into stderr that usually ends with
+"Confirm you are on the latest version". Taking that literally is what once
+labelled a current version `extractor_outdated`. So:
+
+**Two attempts, then stop.** Attempt 1 uses the configured cookies plus
+browser impersonation. If it fails in a way where credentials could plausibly
+be the cause, attempt 2 repeats it anonymously after a short pause. That
+comparison is the diagnosis — it is not available from stderr at all:
+
+| Attempt 1 (cookies) | Attempt 2 (anonymous) | Verdict |
+|---|---|---|
+| blocked | succeeds | `tiktok_cookie_invalid` — replace the cookie export |
+| blocked | blocked | `tiktok_region_restricted` — the server's IP is blocked |
+| private/removed | (not attempted) | terminal; retrying cannot help |
+
+There is no third attempt. TikTok rate-limits aggressively, and hammering it
+turns a recoverable failure into a durable block.
+
+**Categories** replace the old catch-all: `tiktok_layout_changed`,
+`tiktok_bot_challenge`, `tiktok_cookie_invalid`, `tiktok_login_required`,
+`tiktok_video_private`, `tiktok_video_unavailable`,
+`tiktok_region_restricted`, `tiktok_rate_limited`, `tiktok_network_error`,
+`yt_dlp_dependency_missing`, `yt_dlp_update_required`,
+`source_extraction_unknown`. Each carries a message naming what to do, and
+the UI shows which *stage* failed — a source download failing is a different
+problem from transcription failing.
+
+**yt-dlp is never updated during a job.** A mid-job `pip install` swapped the
+binary under running work and never fixed the failure that triggered it.
+Version management is now `YTDLP_CHANNEL` (`stable` | `nightly`) applied at
+worker startup when `YTDLP_UPDATE_ON_STARTUP=true`, or by an explicit admin
+action. The worker logs its version, channel, impersonation targets and
+cookie age at boot.
+
+#### Extraction diagnostics
+
+```bash
+curl -s localhost:8000/api/health/extraction | jq
+```
+
+Reports the installed yt-dlp version and channel, whether impersonation is
+actually available (and which targets), ffmpeg/ffprobe presence, and the
+cookie file's **shape and age** — format, entry count, which TikTok cookie
+*names* are present, and how many days old it is. Never any cookie values,
+tokens, or environment secrets.
+
+A cookie export older than 30 days is flagged `likely_stale`: a rejected
+session produces exactly the same empty page as a bot-check, so age is worth
+knowing before the extractor gets blamed.
 
 ## Research mode (topic search → transcript bundle)
 
@@ -754,7 +800,10 @@ See `.env.example` for the full annotated list. Highlights:
 | `YTDLP_COMMENT_LIMIT` | 100 | Top comments (by likes) saved per URL-ingested job (`MAX_COMMENTS` accepted as an alias) |
 | `TIKTOK_DEVICE_ID` | (unset) | Switches TikTok to its mobile API instead of scraping the web page. Get it from the TikTok app: Settings → scroll to the bottom → tap the version number 5×. See [TikTok extraction](#tiktok-extraction) |
 | `YTDLP_EXTRACTOR_ARGS` | (unset) | Raw `--extractor-args` passthrough, semicolon-separated (e.g. `tiktok:app_info=…;youtube:player_client=web`) |
-| `YTDLP_ALLOW_NIGHTLY_UPDATE` | false | After a failed extraction, allow falling back to the yt-dlp nightly channel when stable is already current. Off by default (nightlies are less tested); worth enabling when TikTok/Instagram break |
+| `YTDLP_CHANNEL` | stable | `stable` or `nightly`. Applied at worker startup, never during a job |
+| `YTDLP_UPDATE_ON_STARTUP` | false | Install `YTDLP_CHANNEL` when the worker boots. Off by default so a container matches its pinned image |
+| `YTDLP_IMPERSONATE_TARGET` | chrome | TLS fingerprint forced on every request, when curl_cffi makes it available |
+| `YTDLP_RETRY_DELAY_SECONDS` | 2.0 | Pause before the single anonymous retry |
 | `OPENING_DENSE_DURATION` / `OPENING_DENSE_INTERVAL` | 8 / 0.25 | Dense hook-analysis frames: one every INTERVAL seconds for the first DURATION seconds; per-job overridable, disable per job with `opening_dense_enabled=false` |
 | `COOKIES_FILE` | (unset) | In-container path to a cookies.txt for account-gated fetches — use `/run/secrets/cookies.txt` and drop the file at `secrets/cookies.txt` on the host; optional |
 | `STALE_JOB_TIMEOUT_MINUTES` | 30 | A *running* job with no heartbeat update for this long is marked `failed` (worker crash recovery) |

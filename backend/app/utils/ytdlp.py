@@ -14,46 +14,20 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+from functools import lru_cache
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_settings
+from app.utils.extraction_errors import (
+    RETRY_ANONYMOUSLY,
+    Classification,
+    classify,
+    reconcile,
+)
 from app.utils.timestamps import now_utc_iso
-
-# Substrings that indicate the *video itself* is unavailable — updating
-# yt-dlp will not help here, so these are never eligible for the
-# self-update-and-retry path.
-_UNAVAILABLE_MARKERS = [
-    "private video",
-    "video unavailable",
-    "video has been removed",
-    "this video is no longer available",
-    "account is private",
-    "sign in to confirm your age",
-    "requires payment",
-    "content isn't available",
-    "content is not available",
-    "geo restricted",
-    "not available in your country",
-    "copyright",
-    "removed by the uploader",
-    "this video has been removed",
-]
-
-# Substrings that indicate yt-dlp's extractor itself is broken/outdated for
-# this site (the site changed something yt-dlp doesn't know how to parse
-# yet) — worth a self-update-and-retry.
-_EXTRACTOR_ERROR_MARKERS = [
-    "unable to extract",
-    "unsupported url",
-    "no extractor found",
-    "unable to download webpage",
-    "unable to download api page",
-    "did not get any data blocks",
-    "please report this issue",
-]
-
 
 class YtDlpError(Exception):
     def __init__(self, code: str, message: str, *, stderr: str = ""):
@@ -86,35 +60,6 @@ class VideoMetadata:
     raw: dict = field(repr=False, default_factory=dict)
 
 
-# TikTok's web page returned no embedded data — it served a bot-check or an
-# interstitial instead. yt-dlp's own message tells you to update, but this is
-# a site-side block, not a stale extractor: the TikTok extractor has been
-# current since March 2026 and upstream has the issue open as a site-bug.
-# Given its own advice is misleading, it gets its own code so we neither
-# waste a self-update on it nor repeat the wrong explanation.
-_TIKTOK_WEB_BLOCKED_MARKER = "universal data for rehydration"
-
-TIKTOK_WEB_BLOCKED_MESSAGE = (
-    "TikTok returned a bot-check page instead of the video data. This is not an "
-    "outdated yt-dlp (despite what its own error text says) — TikTok is blocking "
-    "anonymous web extraction from this IP. Set TIKTOK_DEVICE_ID in .env to use "
-    "TikTok's mobile API instead of the web page: open the TikTok app, go to "
-    "Settings, scroll to the bottom and tap the version number 5 times to reveal "
-    "your device ID."
-)
-
-
-def _classify(stderr: str) -> str:
-    lowered = stderr.lower()
-    if any(marker in lowered for marker in _UNAVAILABLE_MARKERS):
-        return "video_unavailable"
-    if _TIKTOK_WEB_BLOCKED_MARKER in lowered:
-        return "tiktok_web_blocked"
-    if any(marker in lowered for marker in _EXTRACTOR_ERROR_MARKERS):
-        return "extractor_outdated"
-    return "download_failed"
-
-
 def extractor_args() -> list[str]:
     """--extractor-args flags assembled from settings.
 
@@ -135,9 +80,26 @@ def extractor_args() -> list[str]:
     return flags
 
 
-def _run(args: list[str], timeout: int) -> subprocess.CompletedProcess:
-    cookies_file = get_settings().COOKIES_FILE
+def _run(
+    args: list[str],
+    timeout: int,
+    *,
+    use_cookies: bool = True,
+    impersonate: str | None = None,
+) -> subprocess.CompletedProcess:
+    """Invoke yt-dlp.
+
+    `use_cookies=False` forces an anonymous request even when COOKIES_FILE is
+    configured — the second attempt of the extraction matrix, and the only way
+    to tell a stale session apart from a server-level block.
+
+    `impersonate` forces a TLS browser fingerprint rather than leaving it to
+    the extractor to request one.
+    """
+    cookies_file = get_settings().COOKIES_FILE if use_cookies else ""
     cmd = ["yt-dlp", *extractor_args()]
+    if impersonate:
+        cmd += ["--impersonate", impersonate]
     cookies_scratch_path: str | None = None
     # COOKIES_FILE is allowed to point at a file that doesn't exist yet
     # (e.g. the user hasn't dropped one into secrets/ yet) — degrade to no
@@ -172,13 +134,14 @@ def get_version() -> str:
     return proc.stdout.decode(errors="replace").strip()
 
 
+@lru_cache(maxsize=1)
 def impersonation_available() -> bool:
     """True when yt-dlp has at least one usable impersonate target.
 
-    TikTok's extractor relies on TLS browser-impersonation; without
-    curl_cffi installed, TikTok returns a bot-check page with no embedded
-    data and yt-dlp reports "Unable to extract universal data for
-    rehydration" — which looks like an outdated extractor but is not one.
+    Cached for the life of the process: it is a property of the installed
+    binary, and it is consulted on every extraction. Without the cache each
+    job pays an extra yt-dlp subprocess just to ask the same question.
+    update_to_channel() clears it, since an update can change the answer.
     """
     try:
         proc = _run(["--list-impersonate-targets"], timeout=30)
@@ -208,6 +171,26 @@ def impersonation_available() -> bool:
     return False
 
 
+def impersonate_targets() -> list[str]:
+    """Usable impersonate targets, as reported by yt-dlp itself. Empty when
+    curl_cffi is missing — which is the state the health endpoint exists to
+    make visible."""
+    try:
+        proc = _run(["--list-impersonate-targets"], timeout=30)
+    except Exception:  # noqa: BLE001 - diagnostics must never break anything
+        return []
+    targets = []
+    for line in proc.stdout.decode(errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("[") or set(stripped) <= {"-"}:
+            continue
+        columns = stripped.split()
+        if len(columns) < 3 or columns[-1].lower() == "source" or "unavailable" in stripped.lower():
+            continue
+        targets.append(columns[0])
+    return targets
+
+
 def _pip_install(spec: str, timeout: int, *, pre: bool = False) -> subprocess.CompletedProcess | None:
     """Returns None when pip couldn't be run at all (missing or timed out)."""
     args = ["pip", "install", "--upgrade"] + (["--pre"] if pre else []) + [spec]
@@ -217,84 +200,114 @@ def _pip_install(spec: str, timeout: int, *, pre: bool = False) -> subprocess.Co
         return None
 
 
-def _self_update(log: callable) -> None:
-    """Attempt one upgrade of yt-dlp. Never raises — a failed update just
-    means we retry with whatever's installed (the pinned version), which is
-    the correct fallback.
+def update_to_channel(channel: str, log: callable) -> dict:
+    """Install yt-dlp from the given release channel. Never raises.
 
-    Extractor fixes for fast-moving sites land on the nightly channel days
-    before stable, so when stable is already current and
-    YTDLP_ALLOW_NIGHTLY_UPDATE is set, a nightly is tried as well."""
+    Called at worker startup or by an explicit admin action — deliberately not
+    from inside a job. Swapping the binary mid-job changed the tool under
+    running work, and the "confirm you are on the latest version" line that
+    motivated doing it appears on nearly every TikTok failure regardless of
+    whether the version is actually stale.
+    """
     settings = get_settings()
-    old_version = get_version()
-    log(
-        "warning",
-        f"yt-dlp extraction looked like a broken/outdated extractor (current version "
-        f"{old_version}); attempting a one-time self-update",
-    )
+    before = get_version()
+    nightly = channel == "nightly"
+    spec = "yt-dlp[default,curl-cffi]"
 
-    proc = _pip_install("yt-dlp", settings.YTDLP_UPDATE_TIMEOUT_SECONDS)
+    log("info", f"Updating yt-dlp to the {channel} channel (currently {before})…")
+    proc = _pip_install(spec, settings.YTDLP_UPDATE_TIMEOUT_SECONDS, pre=nightly)
     if proc is None or proc.returncode != 0:
-        log("warning", f"yt-dlp self-update failed, continuing with pinned version {old_version}")
+        log("warning", f"yt-dlp update failed; continuing with the installed version {before}")
+        return {"ok": False, "channel": channel, "before": before, "after": before}
+
+    impersonation_available.cache_clear()
+    after = get_version()
+    if after != before:
+        log("info", f"yt-dlp updated: {before} -> {after} ({channel})")
     else:
-        new_version = get_version()
-        if new_version != old_version:
-            log("info", f"yt-dlp self-updated: {old_version} -> {new_version}")
-            return
-        log("info", f"yt-dlp self-update ran but version is unchanged ({old_version}) — already the latest stable")
-
-    if settings.YTDLP_ALLOW_NIGHTLY_UPDATE:
-        log("info", "Trying the yt-dlp nightly channel, where extractor fixes land first")
-        nightly = _pip_install("yt-dlp", settings.YTDLP_UPDATE_TIMEOUT_SECONDS, pre=True)
-        if nightly is None or nightly.returncode != 0:
-            log("warning", "yt-dlp nightly update failed; keeping the current version")
-        else:
-            nightly_version = get_version()
-            if nightly_version != old_version:
-                log("info", f"yt-dlp updated to nightly: {old_version} -> {nightly_version}")
-            else:
-                log("info", f"yt-dlp nightly is the same version ({old_version})")
-
+        log("info", f"yt-dlp already current on {channel} ({after})")
     if not impersonation_available():
         log(
             "warning",
             "yt-dlp has no browser-impersonation target available (curl_cffi missing). "
-            "Some extractors request it to match a real browser's TLS fingerprint; "
-            "rebuild the image with the curl-cffi extra to enable it.",
+            "TikTok and some Instagram requests need it.",
         )
+    return {"ok": True, "channel": channel, "before": before, "after": after}
+
+
+def maybe_update_on_startup(log: callable) -> dict | None:
+    """Honour YTDLP_UPDATE_ON_STARTUP. Returns None when disabled."""
+    settings = get_settings()
+    if not settings.YTDLP_UPDATE_ON_STARTUP:
+        return None
+    return update_to_channel(settings.YTDLP_CHANNEL, log)
+
+
+def _preferred_impersonate_target() -> str | None:
+    """The configured target, if yt-dlp actually has it available.
+
+    Passing --impersonate with no curl_cffi installed makes yt-dlp exit
+    immediately, which would turn a recoverable extraction into a hard
+    failure — so this is gated on a real capability check.
+    """
+    settings = get_settings()
+    if not settings.YTDLP_IMPERSONATE_TARGET:
+        return None
+    return settings.YTDLP_IMPERSONATE_TARGET if impersonation_available() else None
 
 
 def _run_with_extractor_retry(args: list[str], timeout: int, log: callable) -> subprocess.CompletedProcess:
-    proc = _run(args, timeout)
+    """Run yt-dlp through a bounded attempt matrix.
+
+    Attempt 1: configured cookies + browser impersonation.
+    Attempt 2: no cookies, same impersonation — only when attempt 1 failed in
+               a way where credentials could plausibly be the cause.
+
+    Two attempts, no more. TikTok rate-limits aggressively, and hammering it
+    turns a recoverable failure into a durable block. Notably, self-updating
+    yt-dlp mid-job is gone: it never fixed anything, it changed the binary
+    under a running job, and the "confirm you are on the latest version"
+    boilerplate that motivated it appears on almost every TikTok failure.
+    Version management now happens at startup (see maybe_update_on_startup).
+    """
+    impersonate = _preferred_impersonate_target()
+    cookies_in_play = bool(cookies_configured())
+
+    proc = _run(args, timeout, impersonate=impersonate)
     if proc.returncode == 0:
         return proc
 
     stderr = proc.stderr.decode(errors="replace")
-    code = _classify(stderr)
-    if code == "tiktok_web_blocked":
-        # Deliberately no self-update: updating provably does not fix this,
-        # and saying otherwise is what sent us chasing the wrong cause.
-        if get_settings().TIKTOK_DEVICE_ID:
-            raise YtDlpError(
-                code,
-                "TikTok's mobile API and web page both failed for this video. "
-                "The configured TIKTOK_DEVICE_ID may be stale or rejected — try "
-                "re-reading it from the TikTok app, or clear COOKIES_FILE and retry.",
-                stderr=stderr,
-            )
-        raise YtDlpError(code, TIKTOK_WEB_BLOCKED_MESSAGE, stderr=stderr)
-    if code != "extractor_outdated":
-        raise YtDlpError(code, _first_error_line(stderr) or "yt-dlp failed", stderr=stderr)
+    first = classify(stderr, used_cookies=cookies_in_play)
 
-    # Looks like a broken/outdated extractor, not a 404/private video: self-update once, retry once.
-    _self_update(log)
-    retry_proc = _run(args, timeout)
-    if retry_proc.returncode == 0:
-        return retry_proc
+    should_retry_anonymously = (
+        cookies_in_play and not first.terminal and first.code in RETRY_ANONYMOUSLY
+    )
+    if not should_retry_anonymously:
+        raise YtDlpError(first.code, first.message, stderr=stderr)
 
-    retry_stderr = retry_proc.stderr.decode(errors="replace")
-    retry_code = _classify(retry_stderr)
-    raise YtDlpError(retry_code, _first_error_line(retry_stderr) or "yt-dlp failed after self-update retry", stderr=retry_stderr)
+    log(
+        "warning",
+        f"Extraction failed with the configured cookies ({first.code}); "
+        "retrying once anonymously to tell a stale session apart from a server-level block.",
+    )
+    # A short pause: back-to-back requests after a challenge page are the
+    # fastest way to earn a rate limit.
+    time.sleep(get_settings().YTDLP_RETRY_DELAY_SECONDS)
+
+    anon = _run(args, timeout, use_cookies=False, impersonate=impersonate)
+    if anon.returncode == 0:
+        log(
+            "warning",
+            "Anonymous retry succeeded — the configured TikTok cookies are stale or "
+            "rejected. Replace COOKIES_FILE with a fresh export.",
+        )
+        return anon
+
+    anon_stderr = anon.stderr.decode(errors="replace")
+    verdict = reconcile(first, classify(anon_stderr, used_cookies=False))
+    log("error", f"Both authenticated and anonymous extraction failed ({verdict.code}).")
+    raise YtDlpError(verdict.code, verdict.message, stderr=anon_stderr)
 
 
 def _first_error_line(stderr: str) -> str | None:
@@ -338,6 +351,66 @@ def _upload_date_iso(info: dict) -> str | None:
         return datetime.strptime(raw, "%Y%m%d").date().isoformat()
     except ValueError:
         return None
+
+
+def cookies_configured() -> bool:
+    """True when a usable cookie file is actually present on disk."""
+    cookies_file = get_settings().COOKIES_FILE
+    return bool(cookies_file) and Path(cookies_file).is_file()
+
+
+# Cookie names TikTok sets on a signed-in session. Presence is checked; values
+# are never read, logged, or returned anywhere.
+_TIKTOK_COOKIE_NAMES = ("sessionid", "sid_tt", "tt_webid", "ttwid", "msToken")
+
+
+def cookie_file_report() -> dict:
+    """Sanitized description of the cookie file: shape and age, never content.
+
+    Deliberately returns no cookie values, no domains beyond a boolean, and no
+    file excerpt — this feeds a diagnostics endpoint and job logs, both of
+    which are visible to anyone who can see the app.
+    """
+    cookies_file = get_settings().COOKIES_FILE
+    if not cookies_file:
+        return {"configured": False, "present": False, "reason": "COOKIES_FILE is not set"}
+    path = Path(cookies_file)
+    if not path.is_file():
+        return {
+            "configured": True,
+            "present": False,
+            "reason": "COOKIES_FILE is set but no file exists at that path",
+        }
+
+    try:
+        stat = path.stat()
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return {"configured": True, "present": True, "readable": False, "reason": str(exc)}
+
+    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+    netscape = text.lstrip().startswith("# Netscape HTTP Cookie File") or all(
+        ln.count("\t") >= 6 for ln in lines[:5]
+    ) if lines else False
+    has_tiktok = any("tiktok" in ln.split("\t", 1)[0].lower() for ln in lines)
+    names = {ln.split("\t")[5] for ln in lines if ln.count("\t") >= 6}
+    age_days = round((time.time() - stat.st_mtime) / 86400, 1)
+
+    return {
+        "configured": True,
+        "present": True,
+        "readable": True,
+        "netscape_format": bool(netscape),
+        "entry_count": len(lines),
+        "has_tiktok_entries": has_tiktok,
+        # Names only — never values.
+        "tiktok_session_cookies_present": sorted(n for n in names if n in _TIKTOK_COOKIE_NAMES),
+        "modified_age_days": age_days,
+        # TikTok sessions go stale in weeks, not months; a very old export is
+        # worth flagging before it is blamed on the extractor.
+        "likely_stale": age_days > 30,
+        "world_readable": bool(stat.st_mode & 0o004),
+    }
 
 
 def cookies_status() -> str:

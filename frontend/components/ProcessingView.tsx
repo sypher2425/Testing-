@@ -5,12 +5,28 @@ import { cancelOrDeleteJob } from "@/lib/api";
 import {
   PIPELINE_STEP_ORDER,
   RESEARCH_STEP_ORDER,
+  SOURCE_FAILURES_OFFERING_UPLOAD,
   TERMINAL_STATES,
   TRANSCRIPT_STEP_ORDER,
   type JobStatusResponse,
 } from "@/lib/types";
 import JobLogPanel from "./JobLogPanel";
 import StatusChip from "./StatusChip";
+
+/** Which stage a failure belongs to, so "source download failed" is never
+ * mistaken for "transcription failed". */
+const STAGE_LABELS: Record<string, string> = {
+  fetching_source: "Source download",
+  searching: "Search",
+  fetching_captions: "Caption download",
+  probing: "Video inspection",
+  loading_model: "Model loading",
+  transcribing: "Transcription",
+  extracting_frames: "Frame extraction",
+  generating_storyboards: "Storyboard generation",
+  generating_metadata: "Metadata generation",
+  zipping: "Dataset packaging",
+};
 
 function useElapsed(startedAt: string | null, stoppedAt: string | null) {
   const [elapsed, setElapsed] = useState(0);
@@ -130,8 +146,22 @@ export default function ProcessingView({ job }: { job: JobStatusResponse }) {
 
         {job.status === "failed" && job.error && (
           <div className="mt-5 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
-            <p className="font-medium">Failed: {job.error.code}</p>
-            <p>{job.error.message}</p>
+            {/* The stage names which part of the pipeline broke — a source
+                download failing is a different problem from transcription
+                failing, and they used to be easy to confuse. */}
+            <p className="font-medium">
+              {STAGE_LABELS[job.current_step] ?? "Processing"} failed
+              <span className="ml-2 font-normal text-red-400/70">({job.error.code})</span>
+            </p>
+            <p className="mt-1">{job.error.message}</p>
+            {SOURCE_FAILURES_OFFERING_UPLOAD.has(job.error.code) && (
+              <a
+                href="/?source=upload"
+                className="mt-3 inline-block rounded-lg bg-red-500/20 px-3 py-1.5 font-medium text-red-200 transition-colors hover:bg-red-500/30"
+              >
+                Upload the video file instead →
+              </a>
+            )}
           </div>
         )}
 

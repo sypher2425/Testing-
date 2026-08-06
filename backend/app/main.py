@@ -69,4 +69,44 @@ def health() -> dict:
     return {"status": "ok", "version": settings.APP_VERSION}
 
 
+@app.get("/api/health/extraction")
+def extraction_health() -> dict:
+    """Everything that decides whether a URL can be fetched, in one place.
+
+    Exists because the failure this diagnoses ("is yt-dlp current? is
+    impersonation actually working? are the cookies stale?") previously
+    required reading job logs and guessing. Contains no cookie values, no
+    tokens and no environment secrets — only shape and age.
+    """
+    from app.utils import ytdlp
+    from app.utils.diagnostics import ffmpeg_available
+
+    try:
+        version = ytdlp.get_version()
+        installed = True
+    except Exception as exc:  # noqa: BLE001 - a missing binary is a finding, not a 500
+        version, installed = str(exc), False
+
+    impersonation = ytdlp.impersonation_available() if installed else False
+    return {
+        "yt_dlp": {
+            "installed": installed,
+            "version": version,
+            "channel": settings.YTDLP_CHANNEL,
+            "update_on_startup": settings.YTDLP_UPDATE_ON_STARTUP,
+        },
+        "impersonation": {
+            "available": impersonation,
+            "configured_target": settings.YTDLP_IMPERSONATE_TARGET,
+            "targets": ytdlp.impersonate_targets() if installed else [],
+        },
+        "ffmpeg": ffmpeg_available(),
+        "cookies": ytdlp.cookie_file_report(),
+        "tiktok": {
+            "device_id_configured": bool(settings.TIKTOK_DEVICE_ID),
+            "mobile_api_enabled": bool(settings.TIKTOK_DEVICE_ID),
+        },
+    }
+
+
 app.include_router(jobs_router)

@@ -1,7 +1,7 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useState } from "react";
 import { ApiError, createJob } from "@/lib/api";
 import JobList from "@/components/JobList";
 import ManualPerformanceFields from "@/components/ManualPerformanceFields";
@@ -20,8 +20,22 @@ const DEFAULT_OPTIONS: CreateJobOptions = {
 };
 
 export default function HomePage() {
+  return (
+    <Suspense fallback={<p className="text-sm text-slate-500">Loading…</p>}>
+      <HomeContent />
+    </Suspense>
+  );
+}
+
+function HomeContent() {
   const router = useRouter();
-  const [appMode, setAppMode] = useState<"video" | "transcript" | "research">("video");
+  // ?source=upload is where a failed source download sends the user, so the
+  // fallback lands on the file picker instead of the link box they just
+  // watched fail.
+  const wantsUpload = useSearchParams().get("source") === "upload";
+  const [appMode, setAppMode] = useState<"video" | "transcript" | "research">(
+    wantsUpload ? "transcript" : "video"
+  );
   const [source, setSource] = useState<JobSource | null>(null);
   const [options, setOptions] = useState<CreateJobOptions>(DEFAULT_OPTIONS);
   const [manualOverrides, setManualOverrides] = useState<ManualPerformanceOverrides>({});
@@ -86,7 +100,7 @@ export default function HomePage() {
         {appMode === "research" ? (
           <ResearchForm />
         ) : appMode === "transcript" ? (
-          <TranscriptForm />
+          <TranscriptForm initialTab={wantsUpload ? "file" : "link"} />
         ) : (
           <div className="space-y-4">
             <SourceInput onSourceChange={setSource} disabled={uploading} />
