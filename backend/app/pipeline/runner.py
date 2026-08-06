@@ -40,6 +40,22 @@ def _build_pipeline(job_type: str = "video") -> list:
             ZipOutputStep(),
         ]
 
+    if job_type == "transcript":
+        from app.pipeline.steps.transcript import (
+            TranscriptManifestStep,
+            TranscriptModelStep,
+            TranscriptSourceStep,
+            TranscriptTranscribeStep,
+        )
+
+        return [
+            TranscriptSourceStep(),
+            TranscriptModelStep(),
+            TranscriptTranscribeStep(),
+            TranscriptManifestStep(),
+            ZipOutputStep(),
+        ]
+
     from app.pipeline.steps.extract_frames import ExtractFramesStep
     from app.pipeline.steps.fetch_source import FetchSourceStep
     from app.pipeline.steps.generate_metadata import GenerateMetadataStep

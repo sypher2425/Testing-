@@ -342,11 +342,21 @@ def search_videos(query: str, count: int, sort_mode: str, *, log: callable) -> l
     return list(info.get("entries") or [])
 
 
-def download_captions(url: str, dest_dir: Path, video_id: str, *, manual: bool, log: callable) -> Path | None:
+def download_captions(
+    url: str,
+    dest_dir: Path,
+    video_id: str,
+    *,
+    manual: bool,
+    log: callable,
+    sub_langs: str | None = None,
+) -> Path | None:
     """Download only the subtitle file for one video (never the video itself).
     manual=True fetches creator-provided subtitles; manual=False fetches
-    auto-generated captions. Returns the subtitle file path, or None if
-    yt-dlp produced nothing."""
+    auto-generated captions. `sub_langs` is yt-dlp --sub-langs syntax and
+    defaults to research mode's English-only setting; transcript mode passes
+    a wider selector so a non-English video isn't silently skipped. Returns
+    the subtitle file path, or None if yt-dlp produced nothing."""
     settings = get_settings()
     dest_dir.mkdir(parents=True, exist_ok=True)
     _run_with_extractor_retry(
@@ -356,7 +366,7 @@ def download_captions(url: str, dest_dir: Path, video_id: str, *, manual: bool, 
             "--no-warnings",
             "--write-subs" if manual else "--write-auto-subs",
             "--sub-langs",
-            settings.RESEARCH_SUB_LANGS,
+            sub_langs or settings.RESEARCH_SUB_LANGS,
             "--sub-format",
             "vtt/srt/best",
             "-o",
@@ -425,6 +435,36 @@ def fetch_profile_reel_view_count(username: str, target_id: str, *, log: callabl
     except Exception as exc:  # noqa: BLE001 - best-effort by design, never fails the job
         log("warning", f"Reels-grid view-count fallback failed: {exc}")
         return None
+
+
+def download_audio(url: str, dest_dir: Path, *, log: callable) -> Path:
+    """Downloads only the best audio stream, named 'audio.<ext>'.
+
+    Used by transcript mode when a platform has no captions: Whisper only
+    ever needs the audio, and skipping the video stream saves most of the
+    bytes and most of the time. No ffmpeg post-processing is requested —
+    whatever container the platform serves is fine, since the transcription
+    step re-encodes to WAV anyway.
+    """
+    settings = get_settings()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    _run_with_extractor_retry(
+        [
+            "--no-warnings",
+            "--no-playlist",
+            "-f",
+            "ba/bestaudio/b",
+            "-o",
+            str(dest_dir / "audio.%(ext)s"),
+            url,
+        ],
+        timeout=settings.YTDLP_TIMEOUT_SECONDS,
+        log=log,
+    )
+    matches = sorted(dest_dir.glob("audio.*"))
+    if not matches:
+        raise YtDlpError("download_failed", "yt-dlp reported success but no audio file was found")
+    return matches[0]
 
 
 def download_video(url: str, dest_dir: Path, *, log: callable) -> Path:

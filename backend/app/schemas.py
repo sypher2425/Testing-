@@ -57,6 +57,21 @@ class CreateResearchJobRequest(BaseModel):
     max_duration_seconds: int | None = Field(default=None, ge=1)
 
 
+class CreateTranscriptJobRequest(BaseModel):
+    """Transcript mode: one link from any platform yt-dlp supports -> a
+    transcript. No frames, no storyboards, and the video stream is never
+    downloaded (audio only, and only when captions aren't available)."""
+
+    url: str = Field(min_length=1, max_length=2048)
+    # captions_first: platform captions, Whisper fallback (default)
+    # captions_only: never download audio; fail if there are no captions
+    # whisper_only: ignore platform captions, always transcribe the audio
+    source_preference: Literal["captions_first", "captions_only", "whisper_only"] = "captions_first"
+    # ISO-639-1 hint for which caption track to request. None means "prefer
+    # English, accept what exists" — Whisper detects the language itself.
+    language: str | None = Field(default=None, max_length=8)
+
+
 class VideoProperties(BaseModel):
     duration_seconds: float | None = None
     width: int | None = None

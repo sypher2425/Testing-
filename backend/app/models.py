@@ -27,11 +27,26 @@ RESEARCH_PIPELINE_STEPS = [
     "generating_metadata",
     "zipping",
 ]
+# Transcript mode reuses the video pipeline's step names (a strict subset, in
+# the same order) so it needs no new job states anywhere — the API, the SSE
+# stream and the frontend status chips all already know these.
+TRANSCRIPT_PIPELINE_STEPS = [
+    "queued",
+    "fetching_source",
+    "loading_model",
+    "transcribing",
+    "generating_metadata",
+    "zipping",
+]
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
 
 
 def steps_for_job_type(job_type: str | None) -> list[str]:
-    return RESEARCH_PIPELINE_STEPS if job_type == "research" else PIPELINE_STEPS
+    if job_type == "research":
+        return RESEARCH_PIPELINE_STEPS
+    if job_type == "transcript":
+        return TRANSCRIPT_PIPELINE_STEPS
+    return PIPELINE_STEPS
 
 
 def _uuid() -> str:

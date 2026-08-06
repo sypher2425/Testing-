@@ -31,6 +31,7 @@ from app.schemas import (
     CreateJobOptions,
     CreateJobResponse,
     CreateResearchJobRequest,
+    CreateTranscriptJobRequest,
     FrameListResponse,
     JobListResponse,
     JobStatusResponse,
@@ -556,6 +557,50 @@ def create_research_job(
     return CreateJobResponse(job_id=job_id)
 
 
+@router.post("/transcript", status_code=202, response_model=CreateJobResponse)
+def create_transcript_job(
+    body: CreateTranscriptJobRequest,
+    db: Session = Depends(db_session),
+    settings: Settings = Depends(get_settings),
+) -> CreateJobResponse:
+    """Transcript-only job from a link on any platform yt-dlp supports.
+
+    Cheap by construction: platform captions are tried first, and Whisper
+    only runs when there are none — so the disk check is a floor check, not
+    a video-sized reservation."""
+    url = body.url.strip()
+    _validate_ingest_url(url)
+
+    try:
+        ensure_enough_disk(str(settings.data_path), incoming_mb=0)
+    except ValueError as exc:
+        raise insufficient_storage(str(exc)) from exc
+
+    job_id = str(uuid.uuid4())
+    job = Job(
+        id=job_id,
+        job_type="transcript",
+        # Replaced with the real title once yt-dlp resolves the link.
+        original_filename=f"Transcript: {url}"[:512],
+        stored_source_filename="",
+        status="queued",
+        current_step="queued",
+        mode="transcript",
+        source_url=url,
+        options={"transcript": {**body.model_dump(mode="json"), "url": url}},
+        step_progress={},
+        last_heartbeat=datetime.now(timezone.utc),
+    )
+    db.add(job)
+    db.commit()
+
+    from app.tasks import process_job
+
+    process_job.delay(job_id)
+
+    return CreateJobResponse(job_id=job_id)
+
+
 @router.get("", response_model=JobListResponse)
 def list_jobs(
     page: int = Query(1, ge=1),
@@ -854,8 +899,8 @@ def regenerate_storyboards_route(
     no re-transcription. Useful after changing layout settings, or to retry
     when storyboard generation failed on a job whose frames are fine."""
     job = _get_job_or_404(db, job_id)
-    if job.job_type == "research":
-        raise bad_request("Research jobs have no storyboards")
+    if job.job_type in ("research", "transcript"):
+        raise bad_request(f"{job.job_type.capitalize()} jobs have no storyboards")
     if job.status != "completed":
         raise bad_request(
             f"Job {job_id} is not completed yet (status={job.status}); storyboards can only be "
@@ -881,6 +926,8 @@ def download(
 
     if job.job_type == "research" and asset != "zip":
         raise bad_request("Research jobs only support asset=zip")
+    if job.job_type == "transcript" and asset not in ("zip", "transcript"):
+        raise bad_request("Transcript jobs only support asset=zip or asset=transcript")
 
     if asset == "zip":
         rel = f"{job_id}/output.zip"
@@ -891,6 +938,9 @@ def download(
             query = ((job.options or {}).get("research") or {}).get("query", "research")
             stamp = (job.completed_at or job.created_at).date().isoformat()
             download_name = f"research-{_slugify(query)}-{stamp}.zip"
+        elif job.job_type == "transcript":
+            stamp = (job.completed_at or job.created_at).date().isoformat()
+            download_name = f"transcript-{_slugify(job.original_filename)}-{stamp}.zip"
         else:
             download_name = f"{job_id}-dataset.zip"
         return FileResponse(path, media_type="application/zip", filename=download_name)

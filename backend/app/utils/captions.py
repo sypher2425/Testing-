@@ -1,10 +1,14 @@
-"""Subtitle (VTT/SRT) → clean plain-text transcript conversion.
+"""Subtitle (VTT/SRT) parsing, in two shapes.
 
-The output is optimized for reading and LLM ingestion, not subtitle
-playback: timestamps, cue indices, and formatting tags are stripped; the
-duplicated rolling lines that YouTube auto-captions produce (each cue
-repeats the previous line before adding the new one) are collapsed; and the
-result is merged into readable paragraphs.
+`subtitles_to_text` produces reading/LLM-ingestion prose: timestamps, cue
+indices and formatting tags are stripped, the duplicated rolling lines that
+auto-captions produce (each cue repeats the previous line before adding the
+new one) are collapsed, and the result is merged into paragraphs.
+
+`subtitles_to_segments` keeps the cue timing, producing the same
+{start, end, text} segment list that Whisper transcription produces — so a
+platform-caption transcript and a Whisper transcript are interchangeable
+downstream (same JSON, same SRT, same frame alignment).
 """
 import html
 import re
@@ -18,6 +22,99 @@ _SENTENCE_END = re.compile(r"[.!?][\"')\]]?$")
 
 _HEADER_PREFIXES = ("WEBVTT", "Kind:", "Language:")
 _BLOCK_PREFIXES = ("NOTE", "STYLE", "REGION")
+
+# Cue timing, both dialects: "00:00:01.500 --> 00:00:03.000" (VTT, dot) and
+# "00:00:01,500 --> 00:00:03,000" (SRT, comma). Hours are optional in VTT.
+_CUE_TIMING = re.compile(
+    r"(?P<start>\d{1,3}:\d{2}(?::\d{2})?[.,]\d{1,3})\s*-->\s*"
+    r"(?P<end>\d{1,3}:\d{2}(?::\d{2})?[.,]\d{1,3})"
+)
+
+
+def _cue_time_to_seconds(value: str) -> float:
+    """"00:01:02.500" or "01:02.500" -> seconds. mm:ss is the VTT short form."""
+    clock, _, fraction = value.replace(",", ".").partition(".")
+    parts = [int(p) for p in clock.split(":")]
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+    else:
+        hours, (minutes, seconds) = 0, parts
+    total = hours * 3600 + minutes * 60 + seconds
+    # VTT allows 1-3 fraction digits; ".5" means 500ms, not 5ms.
+    return total + (int(fraction) / (10 ** len(fraction)) if fraction else 0.0)
+
+
+def subtitles_to_segments(content: str) -> list[dict]:
+    """Parse VTT/SRT into timed segments: [{start, end, text}, ...].
+
+    Same cleaning as subtitles_to_text (tags, speaker arrows, entities,
+    caption-only bracket cues), but timing is kept — which is what makes a
+    platform-caption transcript interchangeable with a Whisper one.
+
+    Rolling auto-captions carry the previous cue's line into the next cue
+    before appending the new one, so deduplication happens per *line*, not per
+    cue — a whole-cue comparison would keep "A" then "A B". Only an
+    immediately-preceding repeat is dropped (same rule as subtitles_to_text),
+    which leaves a genuinely repeated phrase later in the video intact.
+    A cue left with no lines contributes no segment.
+    """
+    segments: list[dict] = []
+    pending: tuple[float, float] | None = None
+    text_lines: list[str] = []
+    last_norm = ""  # last emitted line, for the rolling-caption repeat
+
+    def flush() -> None:
+        nonlocal pending, text_lines
+        if pending is not None and text_lines:
+            text = " ".join(text_lines).strip()
+            if text:
+                start, end = pending
+                segments.append({"start": round(start, 3), "end": round(end, 3), "text": text})
+        pending = None
+        text_lines = []
+
+    in_block = False
+    for raw_line in content.splitlines():
+        line = raw_line.strip().lstrip("\ufeff")
+        if not line:
+            flush()
+            in_block = False
+            continue
+        if in_block:
+            continue
+        if line.startswith(_BLOCK_PREFIXES):
+            in_block = True
+            continue
+        if line.startswith(_HEADER_PREFIXES):
+            continue
+
+        timing = _CUE_TIMING.search(line)
+        if timing:
+            flush()
+            pending = (
+                _cue_time_to_seconds(timing.group("start")),
+                _cue_time_to_seconds(timing.group("end")),
+            )
+            continue
+        if pending is None:
+            # A cue index, or a stray line before any timing — nothing to
+            # attach it to either way.
+            continue
+
+        text = _INLINE_TAG.sub("", line)
+        text = html.unescape(text).replace("\u200b", " ")
+        text = _SPEAKER_PREFIX.sub("", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text or _BRACKET_ONLY.match(text):
+            continue
+        norm = text.casefold()
+        if norm == last_norm:
+            continue
+        text_lines.append(text)
+        last_norm = norm
+
+    flush()
+    return segments
 
 
 def subtitles_to_text(content: str, *, paragraph_target_chars: int = 550) -> str:
