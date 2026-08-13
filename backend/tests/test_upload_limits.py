@@ -52,7 +52,7 @@ def test_streaming_upload_creates_job(client, data_dir):
         )
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
-    mock_delay.assert_called_once_with(job_id)
+    mock_delay.assert_called_once_with(job_id, retry=False)
 
     status = client.get(f"/api/jobs/{job_id}").json()
     assert status["status"] == "queued"

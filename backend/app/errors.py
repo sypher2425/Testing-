@@ -32,3 +32,9 @@ def unprocessable(message: str, detail: Any | None = None) -> AppError:
 
 def insufficient_storage(message: str, detail: Any | None = None) -> AppError:
     return AppError(507, "insufficient_storage", message, detail)
+
+
+def service_unavailable(message: str, detail: Any | None = None) -> AppError:
+    """503: a dependency the request needs (the broker, say) is down. Distinct
+    from a 500 — the request was fine, the infrastructure wasn't."""
+    return AppError(503, "service_unavailable", message, detail)

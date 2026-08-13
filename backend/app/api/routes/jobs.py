@@ -24,6 +24,7 @@ from app.errors import (
     insufficient_storage,
     not_found,
     payload_too_large,
+    service_unavailable,
     unprocessable,
 )
 from app.models import TERMINAL_STATES, Job, JobLog
@@ -131,7 +132,16 @@ def _parse_options(**kwargs) -> CreateJobOptions:
     try:
         return CreateJobOptions(**kwargs)
     except ValidationError as exc:
-        raise unprocessable("Invalid job options", json.loads(exc.json())) from exc
+        errors = json.loads(exc.json())
+        # Name the offending field in the message itself. The structured detail
+        # was always there, but the UI shows only the message, so "Invalid job
+        # options" was all anyone ever saw.
+        summary = "; ".join(
+            f"{'.'.join(str(p) for p in e.get('loc', ())) or 'options'}: {e.get('msg')}"
+            f" (got {e.get('input')!r})"
+            for e in errors[:3]
+        )
+        raise unprocessable(f"Invalid job options — {summary}", errors) from exc
 
 
 def _parse_events(events: str | None) -> list:
@@ -153,6 +163,32 @@ def _validated_extension(filename: str, allowed: set[str] = ALLOWED_EXTENSIONS) 
             f"Unsupported file extension '.{ext}'. Allowed: {', '.join(sorted(allowed))}",
         )
     return ext
+
+
+def _enqueue(db: Session, job_id: str) -> None:
+    """Hand the job to the broker, failing fast and cleanly if it is down.
+
+    Celery's default retry policy spends ~20 seconds reconnecting before it
+    gives up, so an unreachable Redis turned submission into a long hang and
+    then a 500 -- while leaving a `queued` row behind that nothing would ever
+    run. Here the job is deleted and the caller gets a message naming the
+    actual problem.
+    """
+    from kombu.exceptions import OperationalError
+
+    from app.tasks import process_job
+
+    try:
+        process_job.delay(job_id, retry=False)
+    except (OperationalError, OSError) as exc:
+        db.query(Job).filter(Job.id == job_id).delete()
+        db.commit()
+        get_storage().delete(job_id)
+        raise service_unavailable(
+            "The job queue is unreachable, so this job was not started. Check that the "
+            "redis container is running (`docker compose ps`).",
+            {"error": str(exc)},
+        ) from exc
 
 
 def _persist_video_job(
@@ -199,9 +235,7 @@ def _persist_video_job(
         )
     db.commit()
 
-    from app.tasks import process_job
-
-    process_job.delay(job_id)
+    _enqueue(db, job_id)
 
 
 async def _validate_uploaded_media(
@@ -467,9 +501,7 @@ async def create_job(
         db.add(job)
         db.commit()
 
-        from app.tasks import process_job
-
-        process_job.delay(job_id)
+        _enqueue(db, job_id)
         return CreateJobResponse(job_id=job_id)
 
     assert file is not None and file.filename
@@ -567,9 +599,7 @@ def create_research_job(
     db.add(job)
     db.commit()
 
-    from app.tasks import process_job
-
-    process_job.delay(job_id)
+    _enqueue(db, job_id)
 
     return CreateJobResponse(job_id=job_id)
 
@@ -611,9 +641,7 @@ def create_transcript_job(
     db.add(job)
     db.commit()
 
-    from app.tasks import process_job
-
-    process_job.delay(job_id)
+    _enqueue(db, job_id)
 
     return CreateJobResponse(job_id=job_id)
 
@@ -709,9 +737,7 @@ async def create_transcript_job_from_stream(
     db.add(job)
     db.commit()
 
-    from app.tasks import process_job
-
-    process_job.delay(job_id)
+    _enqueue(db, job_id)
 
     return CreateJobResponse(job_id=job_id)
 

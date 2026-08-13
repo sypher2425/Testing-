@@ -454,7 +454,7 @@ def test_create_transcript_job_enqueues_and_records_its_options(client):
         )
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
-    mock_delay.assert_called_once_with(job_id)
+    mock_delay.assert_called_once_with(job_id, retry=False)
 
     body = client.get(f"/api/jobs/{job_id}").json()
     assert body["job_type"] == "transcript"
@@ -642,7 +642,7 @@ def test_upload_route_accepts_audio_only_files(client):
         )
     assert resp.status_code == 202, resp.text
     job_id = resp.json()["job_id"]
-    mock_delay.assert_called_once_with(job_id)
+    mock_delay.assert_called_once_with(job_id, retry=False)
 
     body = client.get(f"/api/jobs/{job_id}").json()
     assert body["job_type"] == "transcript"

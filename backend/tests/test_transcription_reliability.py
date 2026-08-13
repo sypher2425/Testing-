@@ -347,6 +347,9 @@ def test_recover_interrupted_jobs_requeues_when_source_exists(db_session, storag
         outcome = tasks.recover_interrupted_jobs()
 
     assert outcome["requeued"] == 1
+    # Startup recovery keeps Celery's default publish retry: the worker only
+    # reaches this code after connecting to the broker, so a blip there is
+    # worth riding out rather than failing fast on.
     mock_delay.assert_called_once_with(job_id)
     db_session.expire_all()
     assert db_session.get(Job, job_id).status == "queued"

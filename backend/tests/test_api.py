@@ -57,7 +57,7 @@ def test_create_job_succeeds_and_enqueues(client):
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
     assert job_id
-    mock_delay.assert_called_once_with(job_id)
+    mock_delay.assert_called_once_with(job_id, retry=False)
 
     status_resp = client.get(f"/api/jobs/{job_id}")
     assert status_resp.status_code == 200
@@ -146,7 +146,7 @@ def test_create_job_with_url_succeeds_and_defers_probe(client):
         )
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
-    mock_delay.assert_called_once_with(job_id)
+    mock_delay.assert_called_once_with(job_id, retry=False)
 
     status_resp = client.get(f"/api/jobs/{job_id}")
     assert status_resp.status_code == 200
@@ -164,7 +164,7 @@ def test_create_research_job_succeeds_and_enqueues(client):
         )
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
-    mock_delay.assert_called_once_with(job_id)
+    mock_delay.assert_called_once_with(job_id, retry=False)
 
     status_resp = client.get(f"/api/jobs/{job_id}")
     body = status_resp.json()
@@ -268,3 +268,99 @@ def test_cors_preflight_succeeds_for_both_loopback_origins(client):
         )
         assert resp.status_code == 200, origin
         assert resp.headers.get("access-control-allow-origin") == origin
+
+
+# --------------------------------------------------- real frontend payloads
+
+
+@pytest.mark.parametrize(
+    "label,query",
+    [
+        ("untouched defaults", "mode=adaptive&interval_ms=1000&target_frames=80&frame_format=jpeg&frame_max_dim=1280"),
+        ("dense 0.2s preset", "mode=interval&interval_ms=200&target_frames=80&frame_format=jpeg&frame_max_dim=1280"),
+        ("per_second", "mode=per_second&interval_ms=1000&target_frames=80&frame_format=png&frame_max_dim=720"),
+        (
+            "storyboard options set",
+            "mode=adaptive&interval_ms=1000&target_frames=80&frame_format=jpeg&frame_max_dim=1280"
+            "&storyboard_enabled=true&storyboard_columns=5&storyboard_tiles_per_sheet=24"
+            "&storyboard_include_captions=true",
+        ),
+        (
+            "storyboards off",
+            "mode=adaptive&interval_ms=1000&target_frames=80&frame_format=jpeg&frame_max_dim=1280"
+            "&storyboard_enabled=false&storyboard_include_captions=false",
+        ),
+    ],
+)
+def test_query_strings_the_frontend_actually_builds_are_accepted(client, label, query):
+    """These are copied from lib/api.ts, not invented here. Every earlier test
+    posted hand-written params, so a form state the UI can genuinely produce
+    was never exercised against the schema."""
+    with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
+        "app.tasks.process_job.delay"
+    ):
+        resp = client.post(
+            f"/api/jobs/upload?filename=a.mp4&{query}",
+            content=b"fake mp4 bytes" * 50,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+    assert resp.status_code == 202, f"{label}: {resp.text}"
+
+
+def test_rejected_options_name_the_offending_field(client):
+    """A cleared number box used to post 0 and come back as a bare "Invalid
+    job options", which says nothing about which box to fix."""
+    with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
+        "app.tasks.process_job.delay"
+    ):
+        resp = client.post(
+            "/api/jobs/upload?filename=a.mp4&mode=adaptive&interval_ms=1000"
+            "&target_frames=0&frame_format=jpeg&frame_max_dim=1280",
+            content=b"fake mp4 bytes" * 50,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+    assert resp.status_code == 422
+    message = resp.json()["error"]["message"]
+    assert "target_frames" in message
+    assert "greater than or equal to 10" in message
+    assert "got 0" in message
+
+
+def test_broker_down_fails_fast_without_stranding_a_queued_job(client):
+    """Celery spends ~20s reconnecting by default, so an unreachable Redis
+    turned submission into a long hang and then a 500 — while leaving a
+    `queued` row behind that nothing would ever run."""
+    import time
+
+    from kombu.exceptions import OperationalError
+
+    from app.database import get_session
+    from app.models import Job
+
+    session = get_session()
+    try:
+        before = session.query(Job).count()
+    finally:
+        session.close()
+
+    with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
+        "app.tasks.process_job.delay",
+        side_effect=OperationalError("Error -2 connecting to redis:6379."),
+    ):
+        started = time.monotonic()
+        resp = client.post(
+            "/api/jobs/upload?filename=a.mp4&mode=adaptive",
+            content=b"fake mp4 bytes" * 50,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        elapsed = time.monotonic() - started
+
+    assert resp.status_code == 503
+    assert "redis" in resp.json()["error"]["message"].lower()
+    assert elapsed < 5, f"should fail fast, took {elapsed:.1f}s"
+
+    session = get_session()
+    try:
+        assert session.query(Job).count() == before, "no orphan job row left behind"
+    finally:
+        session.close()

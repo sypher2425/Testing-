@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import type { CreateJobOptions, ExtractionMode, FrameFormat } from "@/lib/types";
 
@@ -35,6 +35,82 @@ interface Props {
   onChange: (options: CreateJobOptions) => void;
 }
 
+
+/** Optional numeric option: empty means "let the server decide", a value in
+ * range is used, and anything else keeps whatever was already set rather than
+ * posting a number the API will reject. */
+function optionalInRange(
+  raw: string,
+  min: number,
+  max: number,
+  current: number | undefined
+): number | undefined {
+  if (raw.trim() === "") return undefined;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : current;
+}
+
+/** A number input that stays usable while you are mid-edit.
+ *
+ * A plain `Number(e.target.value)` turns a cleared field into 0 and a typo
+ * into NaN, and both get posted straight to the API, which rejects them with
+ * "Invalid job options". Here the box holds your raw text (so it can be empty
+ * while you retype), but the value is only committed when it parses inside
+ * [min, max] — the parent never sees a number the API would refuse. On blur
+ * the box snaps back to the committed value, so an abandoned edit cannot
+ * leave the form looking like it holds something it doesn't.
+ */
+function NumberField({
+  label,
+  value,
+  min,
+  max,
+  onCommit,
+  hint,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  onCommit: (next: number) => void;
+  hint?: ReactNode;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const [editing, setEditing] = useState(false);
+
+  // Follow the committed value whenever it changes from elsewhere (a preset
+  // button, say) — but never yank the text out from under an active edit.
+  useEffect(() => {
+    if (!editing) setDraft(String(value));
+  }, [value, editing]);
+
+  return (
+    <label className="text-sm">
+      <span className="mb-1 block text-slate-400">{label}</span>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        value={draft}
+        onFocus={() => setEditing(true)}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          const parsed = Number(e.target.value);
+          if (e.target.value.trim() !== "" && Number.isFinite(parsed) && parsed >= min && parsed <= max) {
+            onCommit(parsed);
+          }
+        }}
+        onBlur={() => {
+          setEditing(false);
+          setDraft(String(value));
+        }}
+        className="w-full rounded-lg border border-surface-border bg-surface px-3 py-1.5"
+      />
+      {hint}
+    </label>
+  );
+}
+
 export default function ModeSelector({ options, onChange }: Props) {
   return (
     <div className="space-y-3">
@@ -63,34 +139,29 @@ export default function ModeSelector({ options, onChange }: Props) {
 
       <div className="card grid grid-cols-1 gap-4 p-4 sm:grid-cols-3">
         {options.mode === "adaptive" && (
-          <label className="text-sm">
-            <span className="mb-1 block text-slate-400">Target frames</span>
-            <input
-              type="number"
-              min={30}
-              max={150}
-              value={options.target_frames}
-              onChange={(e) => onChange({ ...options, target_frames: Number(e.target.value) })}
-              className="w-full rounded-lg border border-surface-border bg-surface px-3 py-1.5"
-            />
-          </label>
+          <NumberField
+            label="Target frames"
+            value={options.target_frames}
+            min={30}
+            max={150}
+            onCommit={(target_frames) => onChange({ ...options, target_frames })}
+          />
         )}
         {options.mode === "interval" && (
-          <label className="text-sm">
-            <span className="mb-1 block text-slate-400">Interval (ms, min 100)</span>
-            <input
-              type="number"
-              min={100}
-              value={options.interval_ms}
-              onChange={(e) => onChange({ ...options, interval_ms: Number(e.target.value) })}
-              className="w-full rounded-lg border border-surface-border bg-surface px-3 py-1.5"
-            />
-            <span className="mt-1 block text-[11px] text-slate-500">
-              Every {(options.interval_ms / 1000).toFixed(2)}s. Long videos widen this
-              automatically to stay under the frame cap — the manifest records what actually
-              ran.
-            </span>
-          </label>
+          <NumberField
+            label="Interval (ms, min 100)"
+            value={options.interval_ms}
+            min={100}
+            max={600000}
+            onCommit={(interval_ms) => onChange({ ...options, interval_ms })}
+            hint={
+              <span className="mt-1 block text-[11px] text-slate-500">
+                Every {(options.interval_ms / 1000).toFixed(2)}s. Long videos widen this
+                automatically to stay under the frame cap — the manifest records what actually
+                ran.
+              </span>
+            }
+          />
         )}
         <label className="text-sm">
           <span className="mb-1 block text-slate-400">Frame format</span>
@@ -103,17 +174,13 @@ export default function ModeSelector({ options, onChange }: Props) {
             <option value="png">PNG</option>
           </select>
         </label>
-        <label className="text-sm">
-          <span className="mb-1 block text-slate-400">Max dimension (px)</span>
-          <input
-            type="number"
-            min={64}
-            max={7680}
-            value={options.frame_max_dim}
-            onChange={(e) => onChange({ ...options, frame_max_dim: Number(e.target.value) })}
-            className="w-full rounded-lg border border-surface-border bg-surface px-3 py-1.5"
-          />
-        </label>
+        <NumberField
+          label="Max dimension (px)"
+          value={options.frame_max_dim}
+          min={64}
+          max={7680}
+          onCommit={(frame_max_dim) => onChange({ ...options, frame_max_dim })}
+        />
       </div>
 
       <AdvancedPanel options={options} onChange={onChange} />
@@ -185,7 +252,9 @@ function AdvancedPanel({ options, onChange }: Props) {
                 onChange={(e) =>
                   onChange({
                     ...options,
-                    storyboard_columns: e.target.value ? Number(e.target.value) : undefined,
+                    // Empty means "auto"; anything outside the API's range is
+                    // ignored rather than posted for the server to reject.
+                    storyboard_columns: optionalInRange(e.target.value, 2, 10, options.storyboard_columns),
                   })
                 }
                 className="w-full rounded-lg border border-surface-border bg-surface px-3 py-1.5 disabled:opacity-50"
@@ -204,9 +273,9 @@ function AdvancedPanel({ options, onChange }: Props) {
                 onChange={(e) =>
                   onChange({
                     ...options,
-                    storyboard_tiles_per_sheet: e.target.value
-                      ? Number(e.target.value)
-                      : undefined,
+                    storyboard_tiles_per_sheet: optionalInRange(
+                      e.target.value, 4, 60, options.storyboard_tiles_per_sheet
+                    ),
                   })
                 }
                 className="w-full rounded-lg border border-surface-border bg-surface px-3 py-1.5 disabled:opacity-50"
