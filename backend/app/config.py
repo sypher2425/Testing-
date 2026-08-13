@@ -184,8 +184,12 @@ class Settings(BaseSettings):
     # second full copy of the file on the same volume.
     ZIP_INCLUDE_SOURCE_VIDEO: bool = False
 
-    # CORS
-    CORS_ORIGINS: str = "http://localhost:3000"
+    # CORS. Both spellings of loopback by default: a browser treats
+    # http://localhost:3000 and http://127.0.0.1:3000 as different origins, so
+    # listing only one turns an ordinary address-bar habit into an opaque
+    # "Failed to fetch". Add your LAN address or hostname here when serving
+    # the UI to other machines.
+    CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     @property
     def cors_origins_list(self) -> list[str]:

@@ -32,6 +32,26 @@ export class ApiError extends Error {
   }
 }
 
+/** The browser reports every network-level failure as a bare "Failed to
+ * fetch" — no URL, no cause. That is indistinguishable between a stopped API
+ * container, a CORS rejection and a wrong API base URL, which is exactly the
+ * three-way guess this wrapper exists to end. */
+async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (cause) {
+    throw new ApiError(
+      0,
+      "api_unreachable",
+      `Could not reach the API at ${API_BASE_URL}. The api container may not be ` +
+        `running (check \`docker compose ps\`), or this page's address may not be ` +
+        `listed in CORS_ORIGINS — note that localhost and 127.0.0.1 count as ` +
+        `different origins.`,
+      { url, cause: String(cause) }
+    );
+  }
+}
+
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let envelope: ErrorEnvelope | null = null;
@@ -173,7 +193,18 @@ function sendUpload(
       }
     };
 
-    xhr.onerror = () => reject(new ApiError(0, "network_error", "Network error during upload"));
+    // Same three-way ambiguity as apiFetch, and XHR is even less informative.
+    xhr.onerror = () =>
+      reject(
+        new ApiError(
+          0,
+          "api_unreachable",
+          `Could not reach the API at ${API_BASE_URL} to start the upload. Check that ` +
+            "the api container is running and that this page's address is listed in " +
+            "CORS_ORIGINS.",
+          { url: target }
+        )
+      );
     xhr.send(body);
   });
 }
@@ -194,19 +225,19 @@ export function createTranscriptJobFromFile(
 }
 
 export async function listJobs(page = 1, pageSize = 20): Promise<JobListResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs?page=${page}&page_size=${pageSize}`, {
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs?page=${page}&page_size=${pageSize}`, {
     cache: "no-store",
   });
   return handleResponse<JobListResponse>(res);
 }
 
 export async function getJob(jobId: string): Promise<JobStatusResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}`, { cache: "no-store" });
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}`, { cache: "no-store" });
   return handleResponse<JobStatusResponse>(res);
 }
 
 export async function cancelOrDeleteJob(jobId: string): Promise<void> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}`, { method: "DELETE" });
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}`, { method: "DELETE" });
   if (!res.ok && res.status !== 204) {
     await handleResponse(res);
   }
@@ -216,7 +247,7 @@ export async function getTranscript(
   jobId: string,
   format: "txt" | "json" | "srt"
 ): Promise<string | TranscriptJSON> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/transcript?format=${format}`, {
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}/transcript?format=${format}`, {
     cache: "no-store",
   });
   if (format === "json") {
@@ -238,7 +269,7 @@ export async function listFrames(
   page = 1,
   pageSize = 60
 ): Promise<FrameListResponse> {
-  const res = await fetch(
+  const res = await apiFetch(
     `${API_BASE_URL}/api/jobs/${jobId}/frames?page=${page}&page_size=${pageSize}`,
     { cache: "no-store" }
   );
@@ -254,12 +285,12 @@ export function frameUrl(jobId: string, filename: string): string {
 }
 
 export async function getManifest(jobId: string): Promise<Manifest> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/manifest`, { cache: "no-store" });
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}/manifest`, { cache: "no-store" });
   return handleResponse<Manifest>(res);
 }
 
 export async function createResearchJob(params: CreateResearchJobParams): Promise<CreateJobResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/research`, {
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/research`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
@@ -270,7 +301,7 @@ export async function createResearchJob(params: CreateResearchJobParams): Promis
 export async function createTranscriptJob(
   params: CreateTranscriptJobParams,
 ): Promise<CreateJobResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/transcript`, {
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/transcript`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
@@ -279,12 +310,12 @@ export async function createTranscriptJob(
 }
 
 export async function getTranscriptManifest(jobId: string): Promise<TranscriptManifest> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/manifest`, { cache: "no-store" });
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}/manifest`, { cache: "no-store" });
   return handleResponse<TranscriptManifest>(res);
 }
 
 export async function getResearchManifest(jobId: string): Promise<ResearchManifest> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/manifest`, { cache: "no-store" });
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}/manifest`, { cache: "no-store" });
   return handleResponse<ResearchManifest>(res);
 }
 
@@ -293,14 +324,14 @@ export function researchTranscriptUrl(jobId: string, videoId: string): string {
 }
 
 export async function getLogs(jobId: string, sinceId = 0): Promise<LogsResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/logs?since_id=${sinceId}`, {
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}/logs?since_id=${sinceId}`, {
     cache: "no-store",
   });
   return handleResponse<LogsResponse>(res);
 }
 
 export async function getStoryboardManifest(jobId: string): Promise<StoryboardManifest> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/storyboards`, { cache: "no-store" });
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}/storyboards`, { cache: "no-store" });
   return handleResponse<StoryboardManifest>(res);
 }
 
@@ -312,7 +343,7 @@ export function storyboardUrl(jobId: string, file: string): string {
 }
 
 export async function regenerateStoryboards(jobId: string): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/storyboards/regenerate`, {
+  const res = await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}/storyboards/regenerate`, {
     method: "POST",
   });
   return handleResponse<{ status: string }>(res);

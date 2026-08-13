@@ -247,3 +247,24 @@ def test_research_job_download_rejects_non_zip_assets(client):
     resp = client.get(f"/api/jobs/{job_id}/download?asset=frames")
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "bad_request"
+
+
+def test_both_loopback_spellings_are_allowed_by_default():
+    """A browser treats localhost and 127.0.0.1 as different origins, so
+    listing only one turns an address-bar habit into an opaque "Failed to
+    fetch" with nothing in the API log."""
+    from app.config import Settings
+
+    origins = Settings().cors_origins_list
+    assert "http://localhost:3000" in origins
+    assert "http://127.0.0.1:3000" in origins
+
+
+def test_cors_preflight_succeeds_for_both_loopback_origins(client):
+    for origin in ("http://localhost:3000", "http://127.0.0.1:3000"):
+        resp = client.options(
+            "/api/jobs",
+            headers={"Origin": origin, "Access-Control-Request-Method": "POST"},
+        )
+        assert resp.status_code == 200, origin
+        assert resp.headers.get("access-control-allow-origin") == origin
