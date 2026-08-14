@@ -7,8 +7,10 @@ FROM node:20-slim AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+ARG NEXT_PUBLIC_API_BASE_URL=
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+ARG API_PROXY_TARGET=http://api:8000
+ENV API_PROXY_TARGET=$API_PROXY_TARGET
 # Inlined into the client bundle at build time, so it must be a build arg —
 # setting it only at runtime would not reach the browser.
 ARG NEXT_PUBLIC_MAX_UPLOAD_MB=61440

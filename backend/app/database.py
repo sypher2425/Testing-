@@ -54,10 +54,13 @@ def init_db() -> None:
 
     settings = get_settings()
     if settings.DATABASE_URL.startswith("sqlite"):
-        db_path = settings.DATABASE_URL.replace("sqlite:///", "", 1).lstrip("/")
+        # Removing the three-slash SQLite prefix already leaves the correct
+        # absolute path on both platforms: `/data/...` on Linux and `C:\...`
+        # on Windows. Prepending another slash produces the invalid `\C:\...`.
+        db_path = settings.DATABASE_URL.replace("sqlite:///", "", 1)
         from pathlib import Path
 
-        Path("/" + db_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(engine)
     _ensure_schema_columns()
 

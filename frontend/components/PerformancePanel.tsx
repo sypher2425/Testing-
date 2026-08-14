@@ -89,7 +89,7 @@ export default function PerformancePanel({ jobId }: { jobId: string }) {
       {performance.hashtags.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {performance.hashtags.slice(0, 12).map((tag) => (
-            <span key={tag} className="rounded-full bg-indigo-500/10 px-2 py-0.5 text-xs text-indigo-300">
+            <span key={tag} className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">
               #{tag}
             </span>
           ))}
@@ -101,7 +101,7 @@ export default function PerformancePanel({ jobId }: { jobId: string }) {
           href={performance.source_url}
           target="_blank"
           rel="noreferrer"
-          className="mt-3 inline-block text-xs text-indigo-400 hover:underline"
+          className="mt-3 inline-block text-xs text-emerald-400 hover:underline"
         >
           View original source ↗
         </a>

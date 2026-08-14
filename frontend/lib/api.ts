@@ -17,7 +17,46 @@ import type {
   TranscriptManifest,
 } from "./types";
 
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
+
+function uploadApiBaseUrl(): string {
+  if (typeof window === "undefined" || window.location.protocol !== "http:") return API_BASE_URL;
+  // Keep large raw uploads out of the Next proxy. Using the page hostname
+  // avoids the classic LAN bug where a build-time `localhost` points at the
+  // viewer's computer instead of the machine running this site.
+  return `http://${window.location.hostname}:8000`;
+}
+
+const OPTION_DEFAULTS: CreateJobOptions = {
+  mode: "adaptive",
+  interval_ms: 1000,
+  target_frames: 80,
+  frame_format: "jpeg",
+  frame_max_dim: 1280,
+};
+
+function boundedInteger(value: number, fallback: number, min: number, max: number): number {
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+/** Prevent temporary/hidden form state (empty number inputs become zero) from
+ * producing a backend 422 after the user switches extraction modes. */
+export function normalizeCreateJobOptions(options: CreateJobOptions): CreateJobOptions {
+  const normalized: CreateJobOptions = {
+    ...options,
+    interval_ms: boundedInteger(options.interval_ms, OPTION_DEFAULTS.interval_ms, 100, 86_400_000),
+    target_frames: boundedInteger(options.target_frames, OPTION_DEFAULTS.target_frames, 30, 150),
+    frame_max_dim: boundedInteger(options.frame_max_dim, OPTION_DEFAULTS.frame_max_dim, 64, 7680),
+  };
+  if (options.storyboard_columns !== undefined) {
+    normalized.storyboard_columns = boundedInteger(options.storyboard_columns, 5, 2, 10);
+  }
+  if (options.storyboard_tiles_per_sheet !== undefined) {
+    normalized.storyboard_tiles_per_sheet = boundedInteger(options.storyboard_tiles_per_sheet, 24, 4, 60);
+  }
+  return normalized;
+}
 
 export class ApiError extends Error {
   code: string;
@@ -93,17 +132,18 @@ export async function createJob(
   // buffer the whole thing to a temp file first, which doesn't scale to
   // tens of GB. URL jobs keep using the multipart route.
   const isFile = source.kind === "file";
+  const safeOptions = normalizeCreateJobOptions(options);
   let target: string;
   let body: XMLHttpRequestBodyInit;
 
   if (isFile) {
     const params = new URLSearchParams({
       filename: source.file.name,
-      mode: options.mode,
-      interval_ms: String(options.interval_ms),
-      target_frames: String(options.target_frames),
-      frame_format: options.frame_format,
-      frame_max_dim: String(options.frame_max_dim),
+      mode: safeOptions.mode,
+      interval_ms: String(safeOptions.interval_ms),
+      target_frames: String(safeOptions.target_frames),
+      frame_format: safeOptions.frame_format,
+      frame_max_dim: String(safeOptions.frame_max_dim),
     });
     for (const key of [
       "storyboard_enabled",
@@ -111,7 +151,7 @@ export async function createJob(
       "storyboard_tiles_per_sheet",
       "storyboard_include_captions",
     ] as const) {
-      const value = options[key];
+      const value = safeOptions[key];
       if (value !== undefined) params.set(key, String(value));
     }
     if (manualOverrides) {
@@ -121,23 +161,23 @@ export async function createJob(
         }
       }
     }
-    target = `${API_BASE_URL}/api/jobs/upload?${params.toString()}`;
+    target = `${uploadApiBaseUrl()}/api/jobs/upload?${params.toString()}`;
     body = source.file;
   } else {
     const formData = new FormData();
     formData.append("url", source.url);
-    formData.append("mode", options.mode);
-    formData.append("interval_ms", String(options.interval_ms));
-    formData.append("target_frames", String(options.target_frames));
-    formData.append("frame_format", options.frame_format);
-    formData.append("frame_max_dim", String(options.frame_max_dim));
+    formData.append("mode", safeOptions.mode);
+    formData.append("interval_ms", String(safeOptions.interval_ms));
+    formData.append("target_frames", String(safeOptions.target_frames));
+    formData.append("frame_format", safeOptions.frame_format);
+    formData.append("frame_max_dim", String(safeOptions.frame_max_dim));
     for (const key of [
       "storyboard_enabled",
       "storyboard_columns",
       "storyboard_tiles_per_sheet",
       "storyboard_include_captions",
     ] as const) {
-      const value = options[key];
+      const value = safeOptions[key];
       if (value !== undefined) formData.append(key, String(value));
     }
     if (manualOverrides) {
@@ -199,12 +239,13 @@ function sendUpload(
         new ApiError(
           0,
           "api_unreachable",
-          `Could not reach the API at ${API_BASE_URL} to start the upload. Check that ` +
+          `Could not reach the API at ${target} to start the upload. Check that ` +
             "the api container is running and that this page's address is listed in " +
             "CORS_ORIGINS.",
           { url: target }
         )
       );
+    xhr.onabort = () => reject(new ApiError(0, "upload_aborted", "The upload was interrupted before it completed."));
     xhr.send(body);
   });
 }
@@ -218,7 +259,7 @@ export function createTranscriptJobFromFile(
 ): Promise<CreateJobResponse> {
   const params = new URLSearchParams({ filename: file.name });
   if (language) params.set("language", language);
-  return sendUpload(`${API_BASE_URL}/api/jobs/transcript/upload?${params.toString()}`, file, {
+  return sendUpload(`${uploadApiBaseUrl()}/api/jobs/transcript/upload?${params.toString()}`, file, {
     raw: true,
     onProgress,
   });
@@ -354,6 +395,15 @@ export function downloadUrl(
   asset: "zip" | "transcript" | "frames" | "storyboards"
 ): string {
   return `${API_BASE_URL}/api/jobs/${jobId}/download?asset=${asset}`;
+}
+
+export function aiDatasetUrl(jobId: string, visuals: "frames" | "storyboards"): string {
+  return `${API_BASE_URL}/api/jobs/${jobId}/download?asset=zip&visuals=${visuals}`;
+}
+
+/** Download only the sheets from one storyboard tab as a ZIP. */
+export function storyboardBundleUrl(jobId: string, storyboardType: string): string {
+  return `${API_BASE_URL}/api/jobs/${jobId}/download?asset=storyboards&storyboard_type=${encodeURIComponent(storyboardType)}`;
 }
 
 export function eventsUrl(jobId: string): string {

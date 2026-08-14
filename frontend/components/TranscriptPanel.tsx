@@ -1,8 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { getTranscript, videoUrl } from "@/lib/api";
 import type { TranscriptJSON } from "@/lib/types";
+
+const TranscriptVisualEditor = dynamic(() => import("./TranscriptVisualEditor"), { ssr: false });
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -13,6 +16,7 @@ function formatTime(seconds: number): string {
 export default function TranscriptPanel({ jobId }: { jobId: string }) {
   const [transcript, setTranscript] = useState<TranscriptJSON | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -42,6 +46,11 @@ export default function TranscriptPanel({ jobId }: { jobId: string }) {
 
   return (
     <div className="space-y-3">
+      <div className="flex justify-end">
+        <button type="button" className="btn-primary" onClick={() => setEditorOpen(true)}>
+          Edit as image
+        </button>
+      </div>
       <video ref={videoRef} controls className="w-full rounded-lg bg-black" src={videoUrl(jobId)} />
       <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
         {transcript.segments.map((seg, i) => (
@@ -55,7 +64,7 @@ export default function TranscriptPanel({ jobId }: { jobId: string }) {
             }}
             className="flex w-full items-start gap-3 rounded-lg p-2 text-left text-sm hover:bg-white/5"
           >
-            <span className="mt-0.5 shrink-0 font-mono text-xs text-indigo-400">
+            <span className="mt-0.5 shrink-0 font-mono text-xs text-emerald-400">
               {formatTime(seg.start)}
             </span>
             <span className="text-slate-300">
@@ -65,6 +74,13 @@ export default function TranscriptPanel({ jobId }: { jobId: string }) {
           </button>
         ))}
       </div>
+      {editorOpen && (
+        <TranscriptVisualEditor
+          transcript={transcript}
+          title="Transcript visual"
+          onClose={() => setEditorOpen(false)}
+        />
+      )}
     </div>
   );
 }

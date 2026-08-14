@@ -141,9 +141,134 @@ def test_download_storyboards_subset(client):
 
     names = zipfile.ZipFile(io.BytesIO(resp.content)).namelist()
     assert "storyboards/adaptive_storyboard_01.jpg" in names
-    assert "storyboard_manifest.json" in names
+    assert "storyboard_manifest.json" not in names
     # The subset must not drag in the whole dataset.
     assert not any(n.startswith("frames/") for n in names)
+
+
+def test_download_storyboards_can_filter_to_the_selected_tab(client):
+    """Adaptive-only must not include timeline, transcript-aligned, or other sheets."""
+    import zipfile
+
+    from app.storage import get_storage
+
+    job_id = _completed_job_with_storyboards()
+    storage = get_storage()
+    adaptive = storage.get(f"{job_id}/storyboards/adaptive_storyboard_01.jpg").read_bytes()
+    storage.save_bytes(f"{job_id}/storyboards/timeline_storyboard_01.jpg", adaptive)
+    manifest_path = storage.get(f"{job_id}/storyboard_manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["types_built"].append("timeline")
+    manifest["storyboards"].append(
+        {
+            **manifest["storyboards"][0],
+            "type": "timeline",
+            "file": "storyboards/timeline_storyboard_01.jpg",
+        }
+    )
+    storage.save_bytes(
+        f"{job_id}/storyboard_manifest.json",
+        json.dumps(manifest).encode(),
+    )
+
+    resp = client.get(
+        f"/api/jobs/{job_id}/download?asset=storyboards&storyboard_type=adaptive"
+    )
+    assert resp.status_code == 200
+    assert "adaptive-storyboards.zip" in resp.headers["content-disposition"]
+    names = zipfile.ZipFile(io.BytesIO(resp.content)).namelist()
+    assert names == ["storyboards/adaptive_storyboard_01.jpg"]
+    assert "storyboards/timeline_storyboard_01.jpg" not in names
+    assert "storyboard_manifest.json" not in names
+
+
+def test_download_storyboards_filtered_type_requires_a_sheet(client):
+    job_id = _completed_job_with_storyboards()
+    resp = client.get(
+        f"/api/jobs/{job_id}/download?asset=storyboards&storyboard_type=transcript"
+    )
+    assert resp.status_code == 404
+
+
+def test_ai_dataset_frames_mode_is_minimal_and_has_no_storyboards(client):
+    import zipfile
+
+    from app.storage import get_storage
+
+    job_id = _completed_job_with_storyboards()
+    storage = get_storage()
+    wanted = {
+        "transcript/transcript.json": b'{"segments": [{"start": 0, "text": "hello"}]}',
+        "content/audio.json": b'{"words": 1}',
+        "analytics/performance.json": b'{"metrics": {}}',
+        "comments/top_comments.json": b"[]",
+        "comments/extraction_status.json": b'{"status": "success"}',
+        "frames/0000.000.jpg": b"frame-a",
+        "frames/opening_dense/0000.250.jpg": b"frame-b",
+    }
+    excluded = {
+        "manifest.json": b"{}",
+        "events.json": b"[]",
+        "metadata/frames.json": b"[]",
+        "metadata/validation_report.json": b"{}",
+        "transcript/transcript.txt": b"hello",
+        "transcript/transcript.srt": b"hello",
+        "content/caption.txt": b"caption",
+        "performance/comments.json": b"[]",
+    }
+    for rel, data in {**wanted, **excluded}.items():
+        storage.save_bytes(f"{job_id}/{rel}", data)
+
+    resp = client.get(f"/api/jobs/{job_id}/download?asset=zip&visuals=frames")
+    assert resp.status_code == 200
+    names = set(zipfile.ZipFile(io.BytesIO(resp.content)).namelist())
+    assert names == set(wanted)
+    assert not any(name.startswith("storyboards/") for name in names)
+
+
+def test_ai_dataset_storyboard_mode_excludes_every_individual_frame(client):
+    import zipfile
+
+    from app.storage import get_storage
+
+    job_id = _completed_job_with_storyboards()
+    storage = get_storage()
+    storage.save_bytes(f"{job_id}/frames/0000.000.jpg", b"frame")
+    storage.save_bytes(
+        f"{job_id}/transcript/transcript.json",
+        b'{"segments": [{"start": 0, "text": "hello"}]}',
+    )
+
+    resp = client.get(f"/api/jobs/{job_id}/download?asset=zip&visuals=storyboards")
+    assert resp.status_code == 200
+    names = set(zipfile.ZipFile(io.BytesIO(resp.content)).namelist())
+    assert names == {
+        "transcript/transcript.json",
+        "storyboards/adaptive_storyboard_01.jpg",
+    }
+    assert not any(name.startswith("frames/") for name in names)
+    assert "storyboard_manifest.json" not in names
+
+
+def test_single_asset_downloads_exclude_duplicate_metadata(client):
+    import zipfile
+
+    from app.storage import get_storage
+
+    job_id = _completed_job_with_storyboards()
+    storage = get_storage()
+    storage.save_bytes(f"{job_id}/frames/0000.000.jpg", b"frame")
+    storage.save_bytes(f"{job_id}/metadata/frames.json", b"[]")
+    storage.save_bytes(f"{job_id}/transcript/transcript.json", b"{}")
+    storage.save_bytes(f"{job_id}/transcript/transcript.txt", b"duplicate")
+
+    frame_zip = client.get(f"/api/jobs/{job_id}/download?asset=frames")
+    frame_names = set(zipfile.ZipFile(io.BytesIO(frame_zip.content)).namelist())
+    assert frame_names == {"frames/0000.000.jpg"}
+
+    transcript_zip = client.get(f"/api/jobs/{job_id}/download?asset=transcript")
+    transcript_names = set(zipfile.ZipFile(io.BytesIO(transcript_zip.content)).namelist())
+    assert transcript_names == {"transcript/transcript.json"}
 
 
 def test_download_rejects_unknown_asset(client):

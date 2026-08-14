@@ -67,7 +67,7 @@ export default function ManifestSummary({ jobId }: { jobId: string }) {
       </dl>
 
       <button
-        className="mt-3 text-xs text-indigo-400 hover:underline"
+        className="mt-3 text-xs text-emerald-400 hover:underline"
         onClick={() => setExpanded((e) => !e)}
       >
         {expanded ? "Hide" : "Show"} full file list ({manifest.files.length} files)

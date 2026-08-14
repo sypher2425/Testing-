@@ -38,9 +38,14 @@ export default function JobList({ refreshKey }: { refreshKey?: number }) {
     };
   }, [refreshKey]);
 
-  if (loading) return <p className="text-sm text-slate-500">Loading recent jobs…</p>;
+  if (loading) return <div className="loading-line">Loading recent jobs…</div>;
   if (error) return <p className="text-sm text-red-400">{error}</p>;
-  if (jobs.length === 0) return <p className="text-sm text-slate-500">No jobs yet. Upload a video to get started.</p>;
+  if (jobs.length === 0) return (
+    <div className="card border-dashed p-8 text-center">
+      <p className="text-sm text-slate-400">No jobs in the queue yet.</p>
+      <p className="mt-1 text-xs text-slate-600">Your first processed source will appear here.</p>
+    </div>
+  );
 
   return (
     <ul className="space-y-2">
@@ -48,10 +53,10 @@ export default function JobList({ refreshKey }: { refreshKey?: number }) {
         <li key={job.job_id}>
           <Link
             href={`/jobs/${job.job_id}`}
-            className="card flex items-center justify-between gap-3 p-3 transition-colors hover:border-indigo-400/50"
+            className="card group flex items-center justify-between gap-3 p-4 transition-colors hover:border-emerald-400/40"
           >
             <div className="min-w-0">
-              <p className="truncate font-medium">{job.original_filename}</p>
+              <p className="truncate font-medium transition-colors group-hover:text-emerald-100">{job.original_filename}</p>
               <p className="text-xs text-slate-500">
                 {job.mode} · {timeAgo(job.created_at)}
                 {job.frame_count ? ` · ${job.frame_count} frames` : ""}

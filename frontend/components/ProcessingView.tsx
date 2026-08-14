@@ -108,7 +108,7 @@ export default function ProcessingView({ job }: { job: JobStatusResponse }) {
 
         <div className="mb-5 h-2 overflow-hidden rounded-full bg-surface-border">
           <div
-            className="h-full rounded-full bg-indigo-500 transition-all"
+            className="h-full rounded-full bg-emerald-500 transition-all"
             style={{ width: `${job.overall_progress}%` }}
           />
         </div>
@@ -122,10 +122,10 @@ export default function ProcessingView({ job }: { job: JobStatusResponse }) {
               <li key={step.key}>
                 <div className="mb-1 flex items-center justify-between text-sm">
                   <span
-                    className={`flex items-center gap-2 ${isCurrent ? "font-medium text-indigo-300" : isDone ? "text-slate-300" : "text-slate-500"}`}
+                    className={`flex items-center gap-2 ${isCurrent ? "font-medium text-emerald-300" : isDone ? "text-slate-300" : "text-slate-500"}`}
                   >
                     <span
-                      className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] ${isDone ? "bg-emerald-500/20 text-emerald-300" : isCurrent ? "bg-indigo-500/20 text-indigo-300" : "bg-surface-border text-slate-500"}`}
+                      className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] ${isDone ? "bg-emerald-500/20 text-emerald-300" : isCurrent ? "bg-emerald-500/20 text-emerald-300" : "bg-surface-border text-slate-500"}`}
                     >
                       {isDone ? "✓" : "•"}
                     </span>
@@ -135,7 +135,7 @@ export default function ProcessingView({ job }: { job: JobStatusResponse }) {
                 </div>
                 <div className="h-1.5 overflow-hidden rounded-full bg-surface-border">
                   <div
-                    className={`h-full rounded-full transition-all ${isDone ? "bg-emerald-500" : "bg-indigo-500"}`}
+                    className={`h-full rounded-full transition-all ${isDone ? "bg-emerald-500" : "bg-emerald-500"}`}
                     style={{ width: `${pct}%` }}
                   />
                 </div>

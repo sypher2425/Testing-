@@ -7,6 +7,7 @@ import {
   downloadUrl,
   getStoryboardManifest,
   regenerateStoryboards,
+  storyboardBundleUrl,
   storyboardUrl,
 } from "@/lib/api";
 import type { StoryboardManifest, StoryboardSheet } from "@/lib/types";
@@ -101,6 +102,7 @@ export default function StoryboardPanel({ jobId }: { jobId: string }) {
   const hasSheets = sheets.length > 0;
   const visible = sheets.filter((s) => s.type === active);
   const availableTabs = TABS.filter((t) => (manifest?.types_built ?? []).includes(t.key));
+  const activeTab = TABS.find((tab) => tab.key === active);
 
   return (
     <div className="card p-4">
@@ -113,9 +115,14 @@ export default function StoryboardPanel({ jobId }: { jobId: string }) {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {hasSheets && (
+          {hasSheets && active && activeTab && visible.length > 0 && (
+            <a className="btn-primary text-xs" href={storyboardBundleUrl(jobId, active)} download>
+              Download {activeTab.label}
+            </a>
+          )}
+          {hasSheets && availableTabs.length > 1 && (
             <a className="btn-secondary text-xs" href={downloadUrl(jobId, "storyboards")} download>
-              Download all
+              All storyboard types
             </a>
           )}
           <button className="btn-secondary text-xs" onClick={onRegenerate} disabled={regenerating}>
@@ -152,7 +159,7 @@ export default function StoryboardPanel({ jobId }: { jobId: string }) {
                   onClick={() => setActive(tab.key)}
                   className={`rounded-full border px-3 py-1 text-xs transition-colors ${
                     isActive
-                      ? "border-indigo-400 bg-indigo-500/15 text-indigo-200"
+                      ? "border-emerald-400 bg-emerald-500/15 text-emerald-200"
                       : "border-surface-border text-slate-400 hover:text-slate-200"
                   }`}
                 >
@@ -193,7 +200,7 @@ export default function StoryboardPanel({ jobId }: { jobId: string }) {
                     )}
                   </span>
                   <a
-                    className="text-indigo-400 hover:underline"
+                    className="text-emerald-400 hover:underline"
                     href={storyboardUrl(jobId, sheet.file)}
                     download
                   >

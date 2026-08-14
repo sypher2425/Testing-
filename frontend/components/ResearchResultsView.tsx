@@ -59,7 +59,7 @@ function VideoRow({ job, video, index }: { job: JobStatusResponse; video: Resear
           <p className="text-sm font-medium">
             <span className="mr-2 text-slate-500">{index + 1}.</span>
             {video.url ? (
-              <a href={video.url} target="_blank" rel="noreferrer" className="hover:text-indigo-300 hover:underline">
+              <a href={video.url} target="_blank" rel="noreferrer" className="hover:text-emerald-300 hover:underline">
                 {video.title ?? video.id}
               </a>
             ) : (
@@ -87,7 +87,7 @@ function VideoRow({ job, video, index }: { job: JobStatusResponse; video: Resear
 
       {hasTranscript && (
         <button
-          className="mt-2 text-xs text-indigo-400 hover:underline"
+          className="mt-2 text-xs text-emerald-400 hover:underline"
           onClick={() => setExpanded((e) => !e)}
         >
           {expanded ? "Hide transcript" : "View transcript"}

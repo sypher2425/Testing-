@@ -190,6 +190,10 @@ class Settings(BaseSettings):
     # "Failed to fetch". Add your LAN address or hostname here when serving
     # the UI to other machines.
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    CORS_ORIGIN_REGEX: str | None = (
+        r"^https?://(localhost|127\.0\.0\.1|\[::1\]|10(?:\.\d{1,3}){3}|"
+        r"192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})(?::\d+)?$"
+    )
 
     @property
     def cors_origins_list(self) -> list[str]:

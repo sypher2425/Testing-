@@ -52,6 +52,14 @@ ALLOWED_EXTENSIONS = {"mp4", "mov", "mkv", "webm", "avi"}
 # from an .mp3).
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus", "wma"}
 TRANSCRIBABLE_EXTENSIONS = ALLOWED_EXTENSIONS | AUDIO_EXTENSIONS
+STORYBOARD_TYPES = {"key_moments", "opening_dense", "adaptive", "timeline", "transcript"}
+AI_DATASET_COMMON_FILES = (
+    "transcript/transcript.json",
+    "content/audio.json",
+    "analytics/performance.json",
+    "comments/top_comments.json",
+    "comments/extraction_status.json",
+)
 
 _CONTENT_TYPES = {
     "jpg": "image/jpeg",
@@ -133,15 +141,14 @@ def _parse_options(**kwargs) -> CreateJobOptions:
         return CreateJobOptions(**kwargs)
     except ValidationError as exc:
         errors = json.loads(exc.json())
-        # Name the offending field in the message itself. The structured detail
-        # was always there, but the UI shows only the message, so "Invalid job
-        # options" was all anyone ever saw.
-        summary = "; ".join(
-            f"{'.'.join(str(p) for p in e.get('loc', ())) or 'options'}: {e.get('msg')}"
-            f" (got {e.get('input')!r})"
-            for e in errors[:3]
-        )
-        raise unprocessable(f"Invalid job options — {summary}", errors) from exc
+        first = errors[0] if errors else {}
+        field = ".".join(str(part) for part in first.get("loc", [])) or "unknown"
+        reason = str(first.get("msg") or "invalid value")
+        supplied = first.get("input")
+        raise unprocessable(
+            f"Invalid job option '{field}': {reason} (got {supplied!r})",
+            errors,
+        ) from exc
 
 
 def _parse_events(events: str | None) -> list:
@@ -1058,6 +1065,11 @@ def regenerate_storyboards_route(
 def download(
     job_id: str,
     asset: str = Query(..., pattern="^(zip|transcript|frames|storyboards)$"),
+    visuals: str = Query("frames", pattern="^(frames|storyboards)$"),
+    storyboard_type: str | None = Query(
+        None,
+        pattern="^(key_moments|opening_dense|adaptive|timeline|transcript)$",
+    ),
     db: Session = Depends(db_session),
     storage: StorageBackend = Depends(get_storage),
 ) -> Response:
@@ -1071,6 +1083,8 @@ def download(
         raise bad_request("Transcript jobs only support asset=zip or asset=transcript")
 
     if asset == "zip":
+        if job.job_type == "video":
+            return _zip_ai_dataset(job_id, storage, visuals)
         rel = f"{job_id}/output.zip"
         if not storage.exists(rel):
             raise not_found("output.zip not found")
@@ -1087,17 +1101,102 @@ def download(
         return FileResponse(path, media_type="application/zip", filename=download_name)
 
     if asset == "transcript":
-        return _zip_subset(job_id, storage, ["transcript"], f"{job_id}-transcript.zip")
-
-    if asset == "storyboards":
         return _zip_subset(
             job_id,
             storage,
-            ["storyboards", "storyboard_manifest.json"],
+            ["transcript/transcript.json"],
+            f"{job_id}-transcript-json.zip",
+        )
+
+    if asset == "storyboards":
+        if storyboard_type:
+            return _zip_storyboard_type(job_id, storage, storyboard_type)
+        return _zip_subset(
+            job_id,
+            storage,
+            ["storyboards"],
             f"{job_id}-storyboards.zip",
         )
 
-    return _zip_subset(job_id, storage, ["frames", "metadata/frames.json"], f"{job_id}-frames.zip")
+    return _zip_subset(job_id, storage, ["frames"], f"{job_id}-frames.zip")
+
+
+def _storyboard_entries(
+    job_id: str,
+    storage: StorageBackend,
+    storyboard_type: str,
+) -> list[str]:
+    if storyboard_type not in STORYBOARD_TYPES:
+        raise bad_request(f"Unknown storyboard type '{storyboard_type}'")
+
+    manifest_rel = f"{job_id}/storyboard_manifest.json"
+    if not storage.exists(manifest_rel):
+        raise not_found("Storyboard manifest not found")
+    try:
+        manifest = json.loads(storage.get(manifest_rel).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise not_found("Storyboard manifest could not be read")
+
+    entries: list[str] = []
+    for sheet in manifest.get("storyboards") or []:
+        if not isinstance(sheet, dict) or sheet.get("type") != storyboard_type:
+            continue
+        rel = str(sheet.get("file") or "").replace("\\", "/")
+        if not rel.startswith("storyboards/") or not is_safe_relative_path(rel):
+            continue
+        if storage.exists(f"{job_id}/{rel}"):
+            entries.append(rel)
+    return entries
+
+
+def _zip_ai_dataset(job_id: str, storage: StorageBackend, visuals: str) -> Response:
+    """Build a minimal analysis bundle from an explicit allowlist.
+
+    Frames and adaptive storyboards are intentionally mutually exclusive.
+    Internal manifests, events, validation/metadata, duplicate transcript
+    formats, source captions, and legacy compatibility files never enter it.
+    """
+    entries = [
+        rel for rel in AI_DATASET_COMMON_FILES if storage.exists(f"{job_id}/{rel}")
+    ]
+    if visuals == "frames":
+        if not storage.get(f"{job_id}/frames").is_dir():
+            raise not_found("No extracted frames found")
+        entries.append("frames")
+        label = "every-frame"
+    else:
+        adaptive_sheets = _storyboard_entries(job_id, storage, "adaptive")
+        if not adaptive_sheets:
+            raise not_found("No adaptive storyboard sheets found")
+        entries.extend(adaptive_sheets)
+        label = "adaptive-storyboards"
+
+    return _zip_subset(
+        job_id,
+        storage,
+        entries,
+        f"{job_id}-ai-dataset-{label}.zip",
+    )
+
+
+def _zip_storyboard_type(
+    job_id: str,
+    storage: StorageBackend,
+    storyboard_type: str,
+) -> Response:
+    """Bundle only the sheets belonging to one storyboard tab.
+
+    The manifest is authoritative: filename prefixes are an implementation
+    detail and older jobs may use different names. The filtered download
+    deliberately contains only images, not the full multi-type manifest.
+    """
+    entries = _storyboard_entries(job_id, storage, storyboard_type)
+
+    if not entries:
+        raise not_found(f"No {storyboard_type.replace('_', ' ')} storyboard sheets found")
+
+    label = storyboard_type.replace("_", "-")
+    return _zip_subset(job_id, storage, entries, f"{job_id}-{label}-storyboards.zip")
 
 
 def _slugify(text: str) -> str:

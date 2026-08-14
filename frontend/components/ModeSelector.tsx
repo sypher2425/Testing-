@@ -115,17 +115,22 @@ export default function ModeSelector({ options, onChange }: Props) {
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {MODES.map((m) => (
+        {MODES.map((m, index) => (
           <button
             key={m.value}
             type="button"
             onClick={() => onChange({ ...options, mode: m.value })}
-            className={`card p-4 text-left transition-colors hover:border-indigo-400/50 ${
-              options.mode === m.value ? "border-indigo-400 bg-indigo-500/5" : ""
+            className={`card group relative overflow-hidden p-4 text-left transition-colors hover:border-emerald-400/40 ${
+              options.mode === m.value ? "border-emerald-400 bg-emerald-500/5" : ""
             }`}
           >
             <div className="mb-1 flex items-center justify-between">
-              <span className="font-medium">{m.title}</span>
+              <span className="flex items-center gap-2 font-medium">
+                <span className={`font-mono text-[10px] ${options.mode === m.value ? "text-emerald-300" : "text-slate-600"}`}>
+                  0{index + 1}
+                </span>
+                {m.title}
+              </span>
               {m.value === "every_frame" && (
                 <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
                   CAPPED
@@ -137,7 +142,7 @@ export default function ModeSelector({ options, onChange }: Props) {
         ))}
       </div>
 
-      <div className="card grid grid-cols-1 gap-4 p-4 sm:grid-cols-3">
+      <div className="card grid grid-cols-1 gap-4 p-5 sm:grid-cols-3">
         {options.mode === "adaptive" && (
           <NumberField
             label="Target frames"
@@ -219,8 +224,8 @@ function AdvancedPanel({ options, onChange }: Props) {
               onClick={applyDensePreset}
               className={`rounded-lg border px-3 py-1.5 text-xs transition-colors ${
                 options.mode === "interval" && options.interval_ms === 200
-                  ? "border-indigo-400 bg-indigo-500/15 text-indigo-200"
-                  : "border-surface-border text-slate-300 hover:border-indigo-400/60"
+                  ? "border-emerald-400 bg-emerald-500/15 text-emerald-200"
+                  : "border-surface-border text-slate-300 hover:border-emerald-400/60"
               }`}
             >
               Dense — every 0.2s

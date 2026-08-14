@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import {
   cancelOrDeleteJob,
   downloadUrl,
@@ -11,6 +12,8 @@ import {
 import type { JobStatusResponse, TranscriptJSON, TranscriptManifest } from "@/lib/types";
 import JobLogPanel from "./JobLogPanel";
 import StatusChip from "./StatusChip";
+
+const TranscriptVisualEditor = dynamic(() => import("./TranscriptVisualEditor"), { ssr: false });
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -36,7 +39,7 @@ function SourceBadge({ manifest }: { manifest: TranscriptManifest }) {
   }
   if (transcript_source === "whisper") {
     return (
-      <span className="rounded-full bg-indigo-500/15 px-2 py-0.5 text-xs text-indigo-300">
+      <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300">
         transcribed with Whisper
       </span>
     );
@@ -54,6 +57,7 @@ export default function TranscriptResultsView({ job }: { job: JobStatusResponse 
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -114,7 +118,7 @@ export default function TranscriptResultsView({ job }: { job: JobStatusResponse 
                     href={job.source_url}
                     target="_blank"
                     rel="noreferrer"
-                    className="hover:text-indigo-300 hover:underline"
+                    className="hover:text-emerald-300 hover:underline"
                   >
                     open original
                   </a>
@@ -146,6 +150,13 @@ export default function TranscriptResultsView({ job }: { job: JobStatusResponse 
         )}
 
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="btn-primary"
+            onClick={() => setEditorOpen(true)}
+            disabled={!transcript?.segments.length}
+          >
+            Edit as image
+          </button>
           <button className="btn-primary" onClick={handleCopy} disabled={!transcript}>
             {copied ? "Copied!" : "Copy text"}
           </button>
@@ -180,7 +191,7 @@ export default function TranscriptResultsView({ job }: { job: JobStatusResponse 
         <div className="card max-h-[32rem] space-y-1 overflow-y-auto p-4">
           {transcript.segments.map((seg, i) => (
             <p key={i} className="flex items-start gap-3 text-sm leading-relaxed">
-              <span className="mt-0.5 w-14 shrink-0 font-mono text-xs text-indigo-400">
+              <span className="mt-0.5 w-14 shrink-0 font-mono text-xs text-emerald-400">
                 {formatTime(seg.start)}
               </span>
               <span className="text-slate-200">{seg.text}</span>
@@ -190,6 +201,14 @@ export default function TranscriptResultsView({ job }: { job: JobStatusResponse 
       )}
 
       <JobLogPanel jobId={job.job_id} live={false} collapsedByDefault />
+
+      {editorOpen && transcript && (
+        <TranscriptVisualEditor
+          transcript={transcript}
+          title={manifest?.source.title ?? job.original_filename}
+          onClose={() => setEditorOpen(false)}
+        />
+      )}
     </div>
   );
 }

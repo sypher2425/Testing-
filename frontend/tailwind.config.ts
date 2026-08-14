@@ -7,9 +7,9 @@ const config: Config = {
     extend: {
       colors: {
         surface: {
-          DEFAULT: "#0b0f14",
-          raised: "#121821",
-          border: "#232c38",
+          DEFAULT: "#050706",
+          raised: "#0c100d",
+          border: "#263029",
         },
       },
     },

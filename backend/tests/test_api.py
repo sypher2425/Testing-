@@ -26,6 +26,19 @@ def test_get_unknown_job_returns_error_envelope(client):
     assert "message" in body["error"]
 
 
+def test_streaming_upload_cors_accepts_private_lan_frontend(client):
+    resp = client.options(
+        "/api/jobs/upload?filename=clip.mp4",
+        headers={
+            "Origin": "http://192.168.1.25:3000",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == "http://192.168.1.25:3000"
+
+
 def test_create_job_rejects_bad_extension(client):
     resp = client.post(
         "/api/jobs",
@@ -43,6 +56,17 @@ def test_create_job_rejects_invalid_mode(client):
         data={"mode": "not-a-real-mode"},
     )
     assert resp.status_code == 422
+    assert "mode" in resp.json()["error"]["message"]
+
+
+def test_create_job_names_the_invalid_numeric_option(client):
+    resp = client.post(
+        "/api/jobs",
+        files={"file": ("clip.mp4", io.BytesIO(b"fake mp4 bytes"), "video/mp4")},
+        data={"mode": "adaptive", "target_frames": "0"},
+    )
+    assert resp.status_code == 422
+    assert "target_frames" in resp.json()["error"]["message"]
 
 
 def test_create_job_succeeds_and_enqueues(client):

@@ -27,10 +27,15 @@ class StepTimeout(Exception):
 @contextmanager
 def time_limit(seconds: int | float | None, message: str):
     """Bound a blocking call with SIGALRM. A non-positive/None limit disables
-    the guard. Safely degrades to a no-op when not on the main thread (e.g.
-    under pytest-xdist or an eager Celery task), since signal handlers can
-    only be installed from the main thread."""
-    if not seconds or seconds <= 0 or threading.current_thread() is not threading.main_thread():
+    the guard. Safely degrades to a no-op when SIGALRM is unavailable (Windows)
+    or when not on the main thread (e.g. pytest-xdist or an eager Celery task)."""
+    if (
+        not seconds
+        or seconds <= 0
+        or not hasattr(signal, "SIGALRM")
+        or not hasattr(signal, "setitimer")
+        or threading.current_thread() is not threading.main_thread()
+    ):
         yield
         return
 

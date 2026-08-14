@@ -75,7 +75,7 @@ export default function FrameGallery({ jobId }: { jobId: string }) {
           <button
             key={frame.image}
             onClick={() => setLightboxIndex(i)}
-            className="group relative aspect-video overflow-hidden rounded-lg border border-surface-border bg-black/40 transition-colors hover:border-indigo-400/60"
+            className="group relative aspect-video overflow-hidden rounded-lg border border-surface-border bg-black/40 transition-colors hover:border-emerald-400/60"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img

@@ -2,83 +2,84 @@
 
 import { useCallback, useRef, useState } from "react";
 
-import { MAX_UPLOAD_MB, formatFileSize } from "../lib/api";
-
-const ACCEPTED_EXTENSIONS = ["mp4", "mov", "mkv", "webm", "avi"];
+import { formatFileSize } from "../lib/api";
 
 interface Props {
-  onFileSelected: (file: File) => void;
+  onFilesSelected: (files: File[]) => void;
   disabled?: boolean;
-  selectedFile: File | null;
+  selectedFiles: File[];
+  acceptedExtensions: string[];
+  fileKindLabel?: string;
 }
 
-export default function UploadZone({ onFileSelected, disabled, selectedFile }: Props) {
+export default function UploadZone({
+  onFilesSelected,
+  disabled,
+  selectedFiles,
+  acceptedExtensions,
+  fileKindLabel = "video",
+}: Props) {
   const [isDragging, setIsDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFiles = useCallback(
     (files: FileList | null) => {
-      const file = files?.[0];
-      if (!file) return;
-      const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-      if (!ACCEPTED_EXTENSIONS.includes(ext)) {
-        alert(`Unsupported file type .${ext}. Accepted: ${ACCEPTED_EXTENSIONS.join(", ")}`);
-        return;
-      }
-      // Reject here rather than after transferring the whole file.
-      if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-        alert(
-          `${file.name} is ${formatFileSize(file.size)}, which is over the ` +
-            `${formatFileSize(MAX_UPLOAD_MB * 1024 * 1024)} limit.`
-        );
-        return;
-      }
-      onFileSelected(file);
+      if (!files?.length) return;
+      onFilesSelected(Array.from(files));
+      if (inputRef.current) inputRef.current.value = "";
     },
-    [onFileSelected]
+    [onFilesSelected]
   );
+
+  const totalBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0);
 
   return (
     <div
-      onDragOver={(e) => {
-        e.preventDefault();
+      onDragOver={(event) => {
+        event.preventDefault();
         if (!disabled) setIsDragging(true);
       }}
       onDragLeave={() => setIsDragging(false)}
-      onDrop={(e) => {
-        e.preventDefault();
+      onDrop={(event) => {
+        event.preventDefault();
         setIsDragging(false);
-        if (!disabled) handleFiles(e.dataTransfer.files);
+        if (!disabled) handleFiles(event.dataTransfer.files);
       }}
       onClick={() => !disabled && inputRef.current?.click()}
-      className={`card flex min-h-[220px] cursor-pointer flex-col items-center justify-center gap-3 border-2 border-dashed p-8 text-center transition-colors ${
-        isDragging ? "border-indigo-400 bg-indigo-500/10" : "border-surface-border"
-      } ${disabled ? "cursor-not-allowed opacity-60" : "hover:border-indigo-400/60"}`}
+      className={`upload-zone card flex cursor-pointer flex-col items-center justify-center gap-4 border p-8 text-center transition-colors ${
+        isDragging ? "border-emerald-400 bg-emerald-500/10" : "border-surface-border"
+      } ${disabled ? "cursor-not-allowed opacity-60" : "hover:border-emerald-400/60"}`}
     >
       <input
         ref={inputRef}
         type="file"
-        accept={ACCEPTED_EXTENSIONS.map((e) => `.${e}`).join(",")}
+        multiple
+        accept={acceptedExtensions.map((extension) => `.${extension}`).join(",")}
         className="hidden"
         disabled={disabled}
-        onChange={(e) => handleFiles(e.target.files)}
+        onChange={(event) => handleFiles(event.target.files)}
       />
-      <div className="text-4xl">🎬</div>
-      {selectedFile ? (
+      <div className="upload-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" />
+          <path d="M5 14v4.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V14" />
+        </svg>
+      </div>
+      {selectedFiles.length ? (
         <div>
-          <p className="font-medium">{selectedFile.name}</p>
+          <p className="font-medium text-emerald-100">
+            {selectedFiles.length} {fileKindLabel} file{selectedFiles.length === 1 ? "" : "s"} ready
+          </p>
           <p className="text-xs text-slate-400">
-            {formatFileSize(selectedFile.size)} — click or drop to replace
+            {formatFileSize(totalBytes)} total · click or drop to add more
           </p>
         </div>
       ) : (
         <div>
-          <p className="font-medium">Drag & drop a video, or click to browse</p>
-          <p className="text-xs text-slate-400">
-            MP4, MOV, MKV, WEBM, AVI — validated by probing the file, not just its extension
-          </p>
+          <p className="font-medium">Drop {fileKindLabel} files into the pipeline</p>
+          <p className="mt-1 text-xs text-slate-400">or click anywhere to choose multiple files</p>
           <p className="mt-1 text-xs text-slate-500">
-            Up to {formatFileSize(MAX_UPLOAD_MB * 1024 * 1024)} per file
+            Up to 20 files per batch · validated before each job is queued
           </p>
         </div>
       )}

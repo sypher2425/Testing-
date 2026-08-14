@@ -68,11 +68,15 @@ services:
     build:
       context: ./frontend
       args:
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        # Browser requests stay same-origin and Next proxies them internally.
+        # This works from localhost, 127.0.0.1, and LAN hostnames without CORS.
+        NEXT_PUBLIC_API_BASE_URL: ""
+        API_PROXY_TARGET: http://api:8000
         NEXT_PUBLIC_MAX_UPLOAD_MB: ${NEXT_PUBLIC_MAX_UPLOAD_MB:-${MAX_UPLOAD_MB:-61440}}
     restart: unless-stopped
     environment:
-      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      - NEXT_PUBLIC_API_BASE_URL=
+      - API_PROXY_TARGET=http://api:8000
       - NEXT_PUBLIC_MAX_UPLOAD_MB=${NEXT_PUBLIC_MAX_UPLOAD_MB:-${MAX_UPLOAD_MB:-61440}}
     ports:
       - "3000:3000"
