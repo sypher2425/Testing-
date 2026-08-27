@@ -810,3 +810,82 @@ def test_cookie_status_is_logged_once_not_twice(tmp_path):
         TranscriptSourceStep().run(ctx)
 
     assert sum(1 for _, m in logs if m.startswith("yt-dlp cookies:")) == 1
+
+
+# ------------------------------------------- source cleanup after zipping
+
+
+def _completed_transcript_ctx(tmp_path, *, url):
+    """A context at the point TranscriptZipStep runs: transcript written,
+    manifest present, audio still on disk."""
+    ctx, logs, _ = make_ctx(tmp_path, options={"transcript": {"url": url}})
+    ctx.storage.save_bytes(ctx.job_relative("source", "audio.m4a"), b"x" * 4096)
+    ctx.storage.save_bytes(
+        ctx.job_relative("transcript", "transcript.json"), b'{"segments": []}'
+    )
+    ctx.storage.save_bytes(ctx.job_relative("manifest.json"), b"{}")
+    ctx.shared["source_relative_path"] = ctx.job_relative("source", "audio.m4a")
+    ctx.shared["manifest"] = {}
+    return ctx, logs
+
+
+def test_downloaded_audio_is_deleted_once_the_transcript_exists(tmp_path):
+    """It is excluded from the ZIP and nothing in the UI plays it, so leaving
+    it until retention just burns disk across a batch of link jobs."""
+    from app.pipeline.steps.transcript import TranscriptZipStep
+
+    ctx, logs = _completed_transcript_ctx(tmp_path, url="https://x.test/v")
+    source = ctx.storage.get(ctx.shared["source_relative_path"])
+    assert source.exists()
+
+    TranscriptZipStep().run(ctx)
+
+    assert not source.exists()
+    assert ctx.storage.exists(ctx.job_relative("output.zip"))
+    # The transcript itself must survive — that is the whole deliverable.
+    assert ctx.storage.exists(ctx.job_relative("transcript", "transcript.json"))
+    assert any("Deleted the downloaded audio" in m for _, m in logs)
+
+
+def test_an_uploaded_file_is_never_deleted(tmp_path):
+    """The user handed us what may be their only copy; deleting it because a
+    transcript succeeded would be a nasty surprise."""
+    from app.pipeline.steps.transcript import TranscriptZipStep
+
+    ctx, _ = _completed_transcript_ctx(tmp_path, url=None)
+    source = ctx.storage.get(ctx.shared["source_relative_path"])
+
+    TranscriptZipStep().run(ctx)
+
+    assert source.exists(), "an uploaded source must be left alone"
+
+
+def test_cleanup_can_be_turned_off(tmp_path):
+    from app.config import get_settings
+    from app.pipeline.steps.transcript import TranscriptZipStep
+
+    ctx, _ = _completed_transcript_ctx(tmp_path, url="https://x.test/v")
+    source = ctx.storage.get(ctx.shared["source_relative_path"])
+
+    settings = get_settings()
+    original = settings.TRANSCRIPT_DELETE_SOURCE_AFTER
+    settings.TRANSCRIPT_DELETE_SOURCE_AFTER = False
+    try:
+        TranscriptZipStep().run(ctx)
+    finally:
+        settings.TRANSCRIPT_DELETE_SOURCE_AFTER = original
+
+    assert source.exists()
+
+
+def test_a_failed_delete_never_fails_the_job(tmp_path):
+    """The transcript is already written and archived by this point; losing
+    the job over a disk hiccup on a file we no longer need is absurd."""
+    from app.pipeline.steps.transcript import TranscriptZipStep
+
+    ctx, logs = _completed_transcript_ctx(tmp_path, url="https://x.test/v")
+    with patch("pathlib.Path.unlink", side_effect=OSError("device busy")):
+        TranscriptZipStep().run(ctx)  # must not raise
+
+    assert any("Could not delete" in m for _, m in logs)
+    assert ctx.storage.exists(ctx.job_relative("output.zip"))

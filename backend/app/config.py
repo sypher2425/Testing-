@@ -136,6 +136,13 @@ class Settings(BaseSettings):
     # another datacenter is usually blocked too. Credentials in this value are
     # redacted everywhere they would otherwise be logged or reported.
     YTDLP_PROXY: str = ""
+    # Transcript mode downloads audio purely to feed Whisper. Once the
+    # transcript exists that file is dead weight -- it is excluded from the
+    # ZIP, nothing in the UI plays it, and it would otherwise sit on disk
+    # until retention cleanup hours later. Deleting it immediately keeps a
+    # batch of link jobs from quietly consuming gigabytes. Uploaded files are
+    # never touched: the user gave us the only copy they may have.
+    TRANSCRIPT_DELETE_SOURCE_AFTER: bool = True
     # TikTok has two extraction paths: scraping the web page, and the mobile
     # API. yt-dlp only tries the API when it has app info — and without one of
     # these set, `_KNOWN_APP_INFO` is empty, so it goes straight to the web

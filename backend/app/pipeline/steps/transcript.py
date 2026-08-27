@@ -36,6 +36,7 @@ from app.pipeline.context import PipelineContext
 from app.pipeline.errors import PipelineFailedError
 from app.pipeline.steps.load_model import LoadWhisperModelStep
 from app.pipeline.steps.transcribe import TranscribeStep
+from app.pipeline.steps.zip_output import ZipOutputStep
 from app.utils.captions import subtitles_to_segments, subtitles_to_text
 from app.utils.ffmpeg import FFmpegError, ffprobe
 from app.utils.timestamps import now_utc_iso
@@ -356,6 +357,46 @@ class TranscriptTranscribeStep(TranscribeStep):
             f"{len(caption_transcript['segments'])} segments"
         )
         ctx.set_step_progress(self.name, 100)
+
+
+class TranscriptZipStep(ZipOutputStep):
+    """The normal ZIP step, then drop the downloaded media.
+
+    Transcript mode fetches audio only to feed Whisper. By this point the
+    transcript is written and the archive is built (the source was already
+    excluded from it), so the file has no remaining reader and would just
+    occupy disk until retention swept it hours later.
+
+    Only *downloaded* sources are removed. An uploaded file is left alone --
+    the user handed us what might be their only copy, and deleting it because
+    a transcript succeeded would be a nasty surprise.
+    """
+
+    def run(self, ctx: PipelineContext) -> None:
+        super().run(ctx)
+
+        settings = get_settings()
+        params = ctx.options.get("transcript") or {}
+        if not settings.TRANSCRIPT_DELETE_SOURCE_AFTER or not params.get("url"):
+            return
+
+        relative = ctx.shared.get("source_relative_path")
+        if not relative:
+            return
+        path = ctx.storage.get(relative)
+        try:
+            size_mb = path.stat().st_size / (1024 * 1024)
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:  # noqa: BLE001 - the transcript is already safe
+            ctx.warning(f"Could not delete the downloaded audio: {exc}")
+            return
+
+        ctx.info(
+            f"Deleted the downloaded audio ({size_mb:.1f}MB) — the transcript is written "
+            "and nothing else reads it."
+        )
 
 
 class TranscriptManifestStep(PipelineStep):

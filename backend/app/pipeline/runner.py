@@ -46,6 +46,7 @@ def _build_pipeline(job_type: str = "video") -> list:
             TranscriptModelStep,
             TranscriptSourceStep,
             TranscriptTranscribeStep,
+            TranscriptZipStep,
         )
 
         return [
@@ -53,7 +54,8 @@ def _build_pipeline(job_type: str = "video") -> list:
             TranscriptModelStep(),
             TranscriptTranscribeStep(),
             TranscriptManifestStep(),
-            ZipOutputStep(),
+            # Same step name as ZipOutputStep, so no new job state.
+            TranscriptZipStep(),
         ]
 
     from app.pipeline.steps.extract_frames import ExtractFramesStep

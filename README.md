@@ -585,6 +585,12 @@ fetching_source → loading_model → transcribing → generating_metadata → z
   video), and Whisper transcribes it as usual. On a long video that is the
   difference between a few MB and a few GB.
 
+Downloaded audio is deleted the moment the transcript is written: it is
+excluded from the ZIP, nothing in the UI plays it, and a batch of link jobs
+would otherwise hold gigabytes until retention swept them hours later
+(`TRANSCRIPT_DELETE_SOURCE_AFTER`, on by default). **Uploaded** files are
+never deleted — that may be your only copy.
+
 Either way the output is the same three files a video job produces —
 `transcript/transcript.json`, `transcript.txt`, `subtitles.srt` — served by
 the same `/api/jobs/{id}/transcript` endpoint. Platform captions are parsed
