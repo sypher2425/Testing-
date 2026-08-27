@@ -71,10 +71,30 @@ def test_a_private_video_is_never_reclassified_by_the_boilerplate():
     assert ee.classify(stderr).terminal is True
 
 
-def test_reconcile_blames_the_server_when_both_attempts_are_blocked():
+def test_reconcile_does_not_invent_an_ip_ban_from_two_failures():
+    """Both attempts failing proves the cookies are not the sole cause. It
+    does not prove the IP is banned — yt-dlp never said so. Asserting it once
+    sent a user on a home connection shopping for a residential proxy."""
     auth = ee.classify(REHYDRATION, used_cookies=True)
     anon = ee.classify(REHYDRATION, used_cookies=False)
-    assert ee.reconcile(auth, anon).code == ee.REGION_RESTRICTED
+    verdict = ee.reconcile(auth, anon)
+    assert verdict.code == ee.EXTRACTION_BLOCKED
+    assert verdict.code != ee.REGION_RESTRICTED
+
+
+def test_region_restricted_is_only_used_when_yt_dlp_actually_says_so():
+    assert ee.classify("ERROR: Your IP address is blocked from accessing this post").code == (
+        ee.REGION_RESTRICTED
+    )
+    assert ee.classify("ERROR: not available in your country").code == ee.REGION_RESTRICTED
+
+
+def test_blocked_verdict_ranks_remedies_cheapest_first():
+    """Someone reading this should try a free cookie re-export before paying
+    for a proxy, so the order in the sentence matters."""
+    message = ee.message_for(ee.EXTRACTION_BLOCKED)
+    assert message.index("cookie export is stale") < message.index("TIKTOK_DEVICE_ID")
+    assert message.index("TIKTOK_DEVICE_ID") < message.index("YTDLP_PROXY")
 
 
 def test_reconcile_prefers_a_terminal_video_state():
@@ -88,6 +108,7 @@ def test_every_category_has_an_actionable_message():
         ee.LAYOUT_CHANGED, ee.BOT_CHALLENGE, ee.COOKIE_INVALID, ee.LOGIN_REQUIRED,
         ee.VIDEO_PRIVATE, ee.VIDEO_UNAVAILABLE, ee.REGION_RESTRICTED, ee.RATE_LIMITED,
         ee.NETWORK_ERROR, ee.DEPENDENCY_MISSING, ee.UPDATE_REQUIRED, ee.UNKNOWN,
+        ee.EXTRACTION_BLOCKED,
     ):
         message = ee.message_for(code)
         assert len(message) > 30
@@ -97,7 +118,10 @@ def test_every_category_has_an_actionable_message():
 
 def test_blocked_categories_offer_the_manual_upload_route():
     """The user should never be stuck when TikTok is the thing that broke."""
-    for code in (ee.LAYOUT_CHANGED, ee.BOT_CHALLENGE, ee.REGION_RESTRICTED, ee.RATE_LIMITED):
+    for code in (
+        ee.LAYOUT_CHANGED, ee.BOT_CHALLENGE, ee.REGION_RESTRICTED,
+        ee.RATE_LIMITED, ee.EXTRACTION_BLOCKED,
+    ):
         assert code in ee.OFFER_MANUAL_UPLOAD
         assert "upload" in ee.message_for(code).lower()
     # A private video cannot be fixed by uploading someone else's file.
@@ -217,15 +241,13 @@ def test_no_proxy_flag_when_unset():
     assert "--proxy" not in captured
 
 
-def test_ip_block_message_names_the_levers_that_exist(client):
+def test_blocked_message_names_the_levers_that_exist(client):
     """"Upload it instead" was the only advice, which is a dead end for
     someone who wants links to work."""
-    message = ee.message_for(ee.REGION_RESTRICTED)
+    message = ee.message_for(ee.EXTRACTION_BLOCKED)
     assert "TIKTOK_DEVICE_ID" in message
     assert "YTDLP_PROXY" in message
     assert "upload" in message.lower()
-    # And it must say why retrying is pointless, or people will keep retrying.
-    assert "cookies are not the problem" in message or "credentials are not the problem" in message
 
 
 def test_diagnostics_reports_proxy_without_leaking_the_password(client, tmp_path):

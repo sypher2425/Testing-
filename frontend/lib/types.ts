@@ -348,6 +348,7 @@ export const SOURCE_FAILURES_OFFERING_UPLOAD = new Set([
   "tiktok_cookie_invalid",
   "tiktok_login_required",
   "tiktok_region_restricted",
+  "tiktok_extraction_blocked",
   "tiktok_rate_limited",
   "source_extraction_unknown",
   "yt_dlp_update_required",

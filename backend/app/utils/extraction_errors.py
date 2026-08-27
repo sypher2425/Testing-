@@ -23,6 +23,11 @@ VIDEO_PRIVATE = "tiktok_video_private"
 VIDEO_UNAVAILABLE = "tiktok_video_unavailable"
 REGION_RESTRICTED = "tiktok_region_restricted"
 RATE_LIMITED = "tiktok_rate_limited"
+#: Both the authenticated and the anonymous attempt were refused. That rules
+#: out the cookies as the *sole* cause but says nothing about why -- which is
+#: exactly why it is not REGION_RESTRICTED. Claiming an IP ban from this
+#: evidence sent a user shopping for a residential proxy they did not need.
+EXTRACTION_BLOCKED = "tiktok_extraction_blocked"
 NETWORK_ERROR = "tiktok_network_error"
 DEPENDENCY_MISSING = "yt_dlp_dependency_missing"
 UPDATE_REQUIRED = "yt_dlp_update_required"
@@ -36,7 +41,10 @@ RETRY_ANONYMOUSLY = frozenset({BOT_CHALLENGE, LAYOUT_CHANGED, COOKIE_INVALID, LO
 #: Categories the user can act on by uploading the file themselves. Drives the
 #: "upload it directly" call to action in the UI.
 OFFER_MANUAL_UPLOAD = frozenset(
-    {LAYOUT_CHANGED, BOT_CHALLENGE, COOKIE_INVALID, LOGIN_REQUIRED, REGION_RESTRICTED, RATE_LIMITED}
+    {
+        LAYOUT_CHANGED, BOT_CHALLENGE, COOKIE_INVALID, LOGIN_REQUIRED,
+        REGION_RESTRICTED, RATE_LIMITED, EXTRACTION_BLOCKED,
+    }
 )
 
 
@@ -73,12 +81,18 @@ _MESSAGES = {
         "server's region."
     ),
     REGION_RESTRICTED: (
-        "TikTok is blocking this server's IP address — the same request failed both "
-        "with and without your session cookies, so credentials are not the problem "
-        "and retrying from this machine will not help. Three things do: set "
-        "TIKTOK_DEVICE_ID to use TikTok's mobile API (a different endpoint from the "
-        "blocked web page), set YTDLP_PROXY to route requests through another IP, or "
-        "upload the video file directly."
+        "TikTok says this video is unavailable from this server's region or IP. "
+        "Routing through another IP (YTDLP_PROXY) or uploading the file directly are "
+        "the ways past it."
+    ),
+    EXTRACTION_BLOCKED: (
+        "TikTok refused both an authenticated and an anonymous request, so the saved "
+        "cookies are not the whole story. Most likely causes, cheapest first: the "
+        "cookie export is stale (re-export it while signed in), TikTok's anti-bot "
+        "rejected the request (set TIKTOK_DEVICE_ID to use its mobile API instead of "
+        "the web page), or the server's IP is blocked — common on a VPS or cloud host, "
+        "rare on a home connection, and fixed with YTDLP_PROXY. Uploading the file "
+        "directly always works."
     ),
     RATE_LIMITED: (
         "TikTok is rate-limiting this server. Wait a few minutes before retrying, or "
@@ -185,9 +199,14 @@ def reconcile(authenticated: Classification, anonymous: Classification | None) -
         return authenticated
     if anonymous.terminal:
         return anonymous
-    if authenticated.code == BOT_CHALLENGE and anonymous.code in (BOT_CHALLENGE, LAYOUT_CHANGED):
-        # Both blocked -> the cookies were never the problem.
-        return Classification(REGION_RESTRICTED, _MESSAGES[REGION_RESTRICTED])
+    if authenticated.code in (BOT_CHALLENGE, LAYOUT_CHANGED) and anonymous.code in (
+        BOT_CHALLENGE, LAYOUT_CHANGED, UNKNOWN
+    ):
+        # Both refused. That exonerates the cookies as the sole cause, and
+        # nothing more: yt-dlp never said "IP blocked", so neither do we. An
+        # earlier version asserted a ban here and pointed at paid proxies,
+        # which was wrong for anyone on a home connection.
+        return Classification(EXTRACTION_BLOCKED, _MESSAGES[EXTRACTION_BLOCKED])
     return anonymous
 
 

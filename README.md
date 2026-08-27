@@ -730,11 +730,15 @@ Extraction failed with the configured cookies (tiktok_bot_challenge)
 Both authenticated and anonymous extraction failed (tiktok_region_restricted)
 ```
 
-Two failures, one with credentials and one without, means the cookies are
-exonerated and **the IP itself is blocked**. Retrying cannot help — the
-request never differs in the way that matters. Three things do:
+Two failures, one with credentials and one without, mean the cookies are not
+the *sole* cause. That is all it means — yt-dlp does not say the IP is
+banned, so neither does the app. Work through these cheapest first:
 
-**1. `TIKTOK_DEVICE_ID` — free, ~30 seconds.** TikTok's mobile API is a
+**1. Re-export your cookies.** The job log prints the export's age; TikTok
+sessions go stale in weeks. A stale jar and a bot-check produce identical
+responses, so rule it out before spending anything.
+
+**2. `TIKTOK_DEVICE_ID` — free, ~30 seconds.** TikTok's mobile API is a
 different endpoint from the blocked web page, and yt-dlp only tries it when it
 has app info. Open the TikTok app → Settings → scroll to the bottom → tap the
 version number 5×.
@@ -744,9 +748,10 @@ TIKTOK_DEVICE_ID=1234567890123456789
 docker compose up -d worker    # .env is read at container start
 ```
 
-**2. `YTDLP_PROXY` — the definitive fix.** Routes requests through a different
-IP. Datacenter proxies are usually blocked too, so this generally means a
-residential proxy.
+**3. `YTDLP_PROXY` — only if the IP really is blocked.** Routes requests
+through a different address. This is common on a **VPS or cloud host**, whose
+ranges TikTok blocks wholesale, and rare on a home connection — so check where
+the worker actually runs before paying for a residential proxy.
 
 ```bash
 YTDLP_PROXY=http://user:pass@proxy.example:8080
@@ -755,7 +760,7 @@ YTDLP_PROXY=http://user:pass@proxy.example:8080
 Credentials in that value are redacted from job logs and from
 `/api/health/extraction`.
 
-**3. Upload the file.** Always available, never blocked, and the failure
+**4. Upload the file.** Always available, never blocked, and the failure
 screen links straight to it.
 
 Both settings apply to every platform, not just TikTok.

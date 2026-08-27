@@ -145,12 +145,13 @@ def test_both_attempts_blocked_points_at_the_server_not_the_cookies():
         with pytest.raises(YtDlpError) as exc_info:
             _run_with_extractor_retry(["--dump-single-json", "url"], timeout=30, log=_noop_log)
 
-    assert exc_info.value.code == "tiktok_region_restricted"
-    # The verdict must say the cookies are exonerated and name a way forward,
-    # or the reader just retries from the same blocked address.
-    assert "blocking this server's IP" in exc_info.value.message
+    assert exc_info.value.code == "tiktok_extraction_blocked"
+    # Two failures exonerate the cookies as the sole cause and nothing more.
+    # yt-dlp never said "IP blocked", so the verdict must not either.
+    assert "not the whole story" in exc_info.value.message
     assert "TIKTOK_DEVICE_ID" in exc_info.value.message
-    assert "YTDLP_PROXY" in exc_info.value.message
+    # An IP ban is offered as one possibility, ranked last and qualified.
+    assert "rare on a home connection" in exc_info.value.message
 
 
 def test_no_anonymous_retry_when_no_cookies_were_used():
