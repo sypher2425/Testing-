@@ -111,7 +111,7 @@ def test_extraction_health_reports_the_whole_environment(client):
     resp = client.get("/api/health/extraction")
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) == {"yt_dlp", "impersonation", "ffmpeg", "cookies", "tiktok"}
+    assert set(body) == {"yt_dlp", "impersonation", "ffmpeg", "cookies", "proxy", "tiktok"}
     assert "version" in body["yt_dlp"]
     assert "channel" in body["yt_dlp"]
     assert "available" in body["impersonation"]
@@ -144,3 +144,100 @@ def test_extraction_health_survives_a_missing_yt_dlp(client):
         resp = client.get("/api/health/extraction")
     assert resp.status_code == 200
     assert resp.json()["yt_dlp"]["installed"] is False
+
+
+# ------------------------------------------------------------------ proxy
+
+
+def test_proxy_credentials_are_redacted_everywhere():
+    """A proxy URL routinely carries a password, and it surfaces in the job
+    log, the diagnostics endpoint and error detail."""
+    from app.utils.ytdlp import redact_proxy
+
+    assert redact_proxy("http://user:s3cret@proxy.example:8080") == "http://***@proxy.example:8080"
+    assert "s3cret" not in redact_proxy("http://user:s3cret@proxy.example:8080")
+    assert redact_proxy("socks5://u:p@1.2.3.4:1080") == "socks5://***@1.2.3.4:1080"
+    # No credentials to hide -> shown as-is, which is useful for debugging.
+    assert redact_proxy("http://proxy.example:8080") == "http://proxy.example:8080"
+    assert redact_proxy("") == ""
+    # Unparseable but non-empty must never fall through as the raw value.
+    assert redact_proxy("not-a-url") == "(configured)"
+
+
+def test_proxy_is_passed_to_yt_dlp_when_configured():
+    """A platform blocking the server's IP cannot be worked around from that
+    IP; routing elsewhere is the only real fix."""
+    import subprocess
+    from unittest.mock import patch as _patch
+
+    from app.config import get_settings
+    from app.utils.ytdlp import _run
+
+    captured: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"{}", stderr=b"")
+
+    settings = get_settings()
+    original = settings.YTDLP_PROXY
+    settings.YTDLP_PROXY = "http://user:pw@proxy.example:8080"
+    try:
+        with _patch("app.utils.ytdlp.subprocess.run", side_effect=fake_run):
+            _run(["--dump-single-json", "url"], timeout=30)
+    finally:
+        settings.YTDLP_PROXY = original
+
+    assert "--proxy" in captured
+    assert captured[captured.index("--proxy") + 1] == "http://user:pw@proxy.example:8080"
+
+
+def test_no_proxy_flag_when_unset():
+    import subprocess
+    from unittest.mock import patch as _patch
+
+    from app.config import get_settings
+    from app.utils.ytdlp import _run
+
+    captured: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"{}", stderr=b"")
+
+    settings = get_settings()
+    original = settings.YTDLP_PROXY
+    settings.YTDLP_PROXY = ""
+    try:
+        with _patch("app.utils.ytdlp.subprocess.run", side_effect=fake_run):
+            _run(["--dump-single-json", "url"], timeout=30)
+    finally:
+        settings.YTDLP_PROXY = original
+
+    assert "--proxy" not in captured
+
+
+def test_ip_block_message_names_the_levers_that_exist(client):
+    """"Upload it instead" was the only advice, which is a dead end for
+    someone who wants links to work."""
+    message = ee.message_for(ee.REGION_RESTRICTED)
+    assert "TIKTOK_DEVICE_ID" in message
+    assert "YTDLP_PROXY" in message
+    assert "upload" in message.lower()
+    # And it must say why retrying is pointless, or people will keep retrying.
+    assert "cookies are not the problem" in message or "credentials are not the problem" in message
+
+
+def test_diagnostics_reports_proxy_without_leaking_the_password(client, tmp_path):
+    from app.config import get_settings
+
+    settings = get_settings()
+    original = settings.YTDLP_PROXY
+    settings.YTDLP_PROXY = "http://user:hunter2@proxy.example:8080"
+    try:
+        body = client.get("/api/health/extraction").text
+    finally:
+        settings.YTDLP_PROXY = original
+
+    assert "hunter2" not in body
+    assert "proxy.example" in body

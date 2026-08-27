@@ -73,8 +73,12 @@ _MESSAGES = {
         "server's region."
     ),
     REGION_RESTRICTED: (
-        "TikTok is blocking this video from the server's region or IP address. "
-        "Upload the video directly to continue."
+        "TikTok is blocking this server's IP address — the same request failed both "
+        "with and without your session cookies, so credentials are not the problem "
+        "and retrying from this machine will not help. Three things do: set "
+        "TIKTOK_DEVICE_ID to use TikTok's mobile API (a different endpoint from the "
+        "blocked web page), set YTDLP_PROXY to route requests through another IP, or "
+        "upload the video file directly."
     ),
     RATE_LIMITED: (
         "TikTok is rate-limiting this server. Wait a few minutes before retrying, or "

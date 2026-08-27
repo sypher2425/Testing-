@@ -306,6 +306,7 @@ def _log_extraction_environment() -> None:
         f"{len(targets)} targets" if targets else "UNAVAILABLE (curl_cffi missing)",
         ytdlp.cookies_status(),
     )
+    logger.info("yt-dlp proxy: %s", ytdlp.proxy_status())
     report = ytdlp.cookie_file_report()
     if report.get("present") and report.get("likely_stale"):
         logger.warning(

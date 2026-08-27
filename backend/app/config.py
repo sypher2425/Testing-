@@ -128,6 +128,14 @@ class Settings(BaseSettings):
     # Pause before the one anonymous retry. Back-to-back requests after a
     # challenge page are the fastest way to earn a rate limit.
     YTDLP_RETRY_DELAY_SECONDS: float = 2.0
+    # Route yt-dlp through a proxy, e.g. "http://user:pass@host:port" or
+    # "socks5://host:1080". This is the only real answer to a platform
+    # blocking the server's IP outright: TikTok in particular blocks whole
+    # datacenter ranges, and retrying from the same address cannot help no
+    # matter how the request is dressed up. Residential proxies work best;
+    # another datacenter is usually blocked too. Credentials in this value are
+    # redacted everywhere they would otherwise be logged or reported.
+    YTDLP_PROXY: str = ""
     # TikTok has two extraction paths: scraping the web page, and the mobile
     # API. yt-dlp only tries the API when it has app info — and without one of
     # these set, `_KNOWN_APP_INFO` is empty, so it goes straight to the web

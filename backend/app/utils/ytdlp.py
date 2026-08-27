@@ -60,6 +60,23 @@ class VideoMetadata:
     raw: dict = field(repr=False, default_factory=dict)
 
 
+def redact_proxy(value: str) -> str:
+    """Proxy URLs routinely carry credentials. Everything that surfaces the
+    proxy — logs, the diagnostics endpoint, error detail — goes through this,
+    so a password never leaves the process."""
+    if not value:
+        return ""
+    match = re.match(r"^(?P<scheme>\w+://)(?:[^@/]+@)?(?P<host>.+)$", value)
+    if not match:
+        return "(configured)"
+    return f"{match.group('scheme')}***@{match.group('host')}" if "@" in value else value
+
+
+def proxy_status() -> str:
+    proxy = get_settings().YTDLP_PROXY
+    return redact_proxy(proxy) if proxy else "not configured"
+
+
 def extractor_args() -> list[str]:
     """--extractor-args flags assembled from settings.
 
@@ -96,8 +113,11 @@ def _run(
     `impersonate` forces a TLS browser fingerprint rather than leaving it to
     the extractor to request one.
     """
-    cookies_file = get_settings().COOKIES_FILE if use_cookies else ""
+    settings = get_settings()
+    cookies_file = settings.COOKIES_FILE if use_cookies else ""
     cmd = ["yt-dlp", *extractor_args()]
+    if settings.YTDLP_PROXY:
+        cmd += ["--proxy", settings.YTDLP_PROXY]
     if impersonate:
         cmd += ["--impersonate", impersonate]
     cookies_scratch_path: str | None = None

@@ -103,6 +103,8 @@ def extraction_health() -> dict:
         },
         "ffmpeg": ffmpeg_available(),
         "cookies": ytdlp.cookie_file_report(),
+        # Redacted: a proxy URL routinely carries credentials.
+        "proxy": {"configured": bool(settings.YTDLP_PROXY), "target": ytdlp.proxy_status()},
         "tiktok": {
             "device_id_configured": bool(settings.TIKTOK_DEVICE_ID),
             "mobile_api_enabled": bool(settings.TIKTOK_DEVICE_ID),
