@@ -263,3 +263,31 @@ def test_diagnostics_reports_proxy_without_leaking_the_password(client, tmp_path
 
     assert "hunter2" not in body
     assert "proxy.example" in body
+
+
+# ------------------------------------------------- the JS challenge failure
+
+
+CHALLENGE_FAILURE = (
+    "ERROR: [TikTok] 7654028891715013910: Unexpected response from webpage request; "
+    "please report this issue on https://github.com/yt-dlp/yt-dlp/issues?q= , filling "
+    "out the appropriate issue template. Confirm you are on the latest version using yt-dlp -U"
+)
+
+
+def test_challenge_solver_failure_is_recognised():
+    """Raised by TikTokBaseIE._solve_challenge_and_set_cookies when the page
+    carries neither the challenge element nor the "Please wait..." page. It
+    used to fall through to `source_extraction_unknown`, which told the reader
+    nothing about the one lever that actually bypasses it."""
+    assert ee.classify(CHALLENGE_FAILURE, used_cookies=True).code == ee.BOT_CHALLENGE
+    assert ee.classify(CHALLENGE_FAILURE, used_cookies=False).code == ee.BOT_CHALLENGE
+
+
+def test_challenge_message_does_not_send_people_back_to_their_cookies():
+    """The challenge is solved before cookies are used, so "refresh your
+    cookies" is a wasted trip — one this project already sent a user on."""
+    message = ee.message_for(ee.BOT_CHALLENGE)
+    assert "will not help" in message
+    assert "TIKTOK_DEVICE_ID" in message
+    assert "nightly" in message

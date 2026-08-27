@@ -734,11 +734,15 @@ Two failures, one with credentials and one without, mean the cookies are not
 the *sole* cause. That is all it means — yt-dlp does not say the IP is
 banned, so neither does the app. Work through these cheapest first:
 
-**1. Re-export your cookies.** The job log prints the export's age; TikTok
-sessions go stale in weeks. A stale jar and a bot-check produce identical
-responses, so rule it out before spending anything.
+**First, read which failure it is.** `tiktok_bot_challenge` means TikTok's
+**JavaScript challenge** could not be solved — from yt-dlp's
+`_solve_challenge_and_set_cookies`, the page carried neither the challenge
+element nor the "Please wait..." interstitial. Cookies are irrelevant to that:
+the challenge runs *before* they are used, so re-exporting them changes
+nothing. Only `tiktok_cookie_invalid` and `tiktok_login_required` are actually
+about your session.
 
-**2. `TIKTOK_DEVICE_ID` — free, ~30 seconds.** TikTok's mobile API is a
+**1. `TIKTOK_DEVICE_ID` — free, ~30 seconds.** TikTok's mobile API is a
 different endpoint from the blocked web page, and yt-dlp only tries it when it
 has app info. Open the TikTok app → Settings → scroll to the bottom → tap the
 version number 5×.
@@ -747,6 +751,11 @@ version number 5×.
 TIKTOK_DEVICE_ID=1234567890123456789
 docker compose up -d worker    # .env is read at container start
 ```
+
+**2. `YTDLP_CHANNEL=nightly`** (with `YTDLP_UPDATE_ON_STARTUP=true`).
+Challenge-solving is the part of the TikTok extractor that changes most often,
+so its fixes reach nightly days before stable. Worth trying whenever the
+failure is `tiktok_bot_challenge`.
 
 **3. `YTDLP_PROXY` — only if the IP really is blocked.** Routes requests
 through a different address. This is common on a **VPS or cloud host**, whose

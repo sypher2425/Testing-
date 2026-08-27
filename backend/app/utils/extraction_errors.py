@@ -64,8 +64,13 @@ _MESSAGES = {
         "directly to continue."
     ),
     BOT_CHALLENGE: (
-        "TikTok returned a verification page instead of the video. Refresh the TikTok "
-        "cookies or upload the video directly."
+        "TikTok's JavaScript challenge could not be solved — it served a page whose "
+        "challenge format this yt-dlp does not recognise. Refreshing cookies will not "
+        "help: this happens before they are used. Two things do. Set TIKTOK_DEVICE_ID "
+        "to use TikTok's mobile API, which skips the challenge entirely. Or set "
+        "YTDLP_CHANNEL=nightly with YTDLP_UPDATE_ON_STARTUP=true — challenge-solving "
+        "fixes land on nightly first, and this is the part of the extractor TikTok "
+        "changes most often. Uploading the file directly always works."
     ),
     COOKIE_INVALID: (
         "The saved TikTok session may have expired. Replace it with a fresh cookie "
@@ -141,9 +146,15 @@ _MARKERS: list[tuple[str, tuple[str, ...]]] = [
         ("login required", "sign in to confirm", "requires authentication", "log in to"),
     ),
     (
+        # TikTok's JS challenge flow, from
+        # TikTokBaseIE._solve_challenge_and_set_cookies: the page carried
+        # neither the challenge element nor the "Please wait..." interstitial.
+        # Cookies are irrelevant here — the failure happens before they are
+        # used, which is why refreshing them changes nothing.
         BOT_CHALLENGE,
         (
             "unable to extract challenge data",
+            "unexpected response from webpage request",
             "please wait...",
             "captcha",
             "verify to continue",
