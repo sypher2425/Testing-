@@ -16,11 +16,14 @@ scenedetect[opencv]==0.6.4
 # can only draw Hershey vector text — no TrueType, no wrapping — which is
 # unreadable for frame captions, so Pillow does the compositing.
 Pillow==10.4.0
-# curl_cffi gives yt-dlp TLS browser-impersonation. TikTok (and increasingly
-# Instagram) serve a bot-check page without it, which yt-dlp reports as
-# "Unable to extract universal data for rehydration" — an error that looks
-# like an outdated extractor but is not fixed by updating.
-yt-dlp[default,curl-cffi]==2026.7.4
+# curl_cffi gives yt-dlp TLS browser-impersonation; the default extra pulls
+# in the rest of its optional deps. 2026.8.19 matters specifically: it adds
+# _generate_blockbuster_headers() to TikTok webpage requests — a new anti-bot
+# header scheme TikTok began enforcing (intermittently) in Aug 2026. Without
+# those headers TikTok serves a page with no embedded data and yt-dlp reports
+# "Unable to extract universal data for rehydration"; 2026.7.4 failed exactly
+# that way on and off depending on whether the check was enforced per-request.
+yt-dlp[default,curl-cffi]==2026.8.19
 python-json-logger==2.0.7
 aiofiles==23.2.1
 httpx==0.27.0
