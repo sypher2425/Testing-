@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
-import { getTranscript, listJobs, transcriptUrl } from "@/lib/api";
+import { bulkTranscriptsUrl, getTranscript, listJobs, transcriptUrl } from "@/lib/api";
 import type { JobStatusResponse, TranscriptJSON, TranscriptSegment } from "@/lib/types";
 
 const TranscriptVisualEditor = dynamic(() => import("./TranscriptVisualEditor"), { ssr: false });
@@ -65,6 +65,8 @@ export default function TranscriptLibrary({ refreshKey = 0 }: { refreshKey?: num
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [bulkFormat, setBulkFormat] = useState<"txt" | "json" | "srt">("txt");
+  const [bulkMerged, setBulkMerged] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -182,6 +184,60 @@ export default function TranscriptLibrary({ refreshKey = 0 }: { refreshKey?: num
             aria-label="Search transcript library"
           />
         </label>
+
+        {filteredJobs.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-surface-border bg-surface px-3 py-2 text-xs text-slate-400">
+            <select
+              value={bulkFormat}
+              onChange={(event) => {
+                const next = event.target.value as "txt" | "json" | "srt";
+                setBulkFormat(next);
+                // Merged SRT is refused server-side (timelines collide), so
+                // the toggle drops rather than sending a doomed request.
+                if (next === "srt") setBulkMerged(false);
+              }}
+              aria-label="Bulk download format"
+              className="rounded-md border border-surface-border bg-surface px-2 py-1 text-slate-200"
+            >
+              <option value="txt">.txt</option>
+              <option value="srt">.srt</option>
+              <option value="json">.json</option>
+            </select>
+            <label
+              className={`flex items-center gap-1.5 ${bulkFormat === "srt" ? "opacity-40" : ""}`}
+              title={
+                bulkFormat === "srt"
+                  ? "SRT can't be combined — each subtitle timeline starts at 00:00"
+                  : "One combined file instead of a ZIP of separate files"
+              }
+            >
+              <input
+                type="checkbox"
+                checked={bulkMerged}
+                disabled={bulkFormat === "srt"}
+                onChange={(event) => setBulkMerged(event.target.checked)}
+              />
+              one file
+            </label>
+            <a
+              className="ml-auto rounded-md bg-indigo-500/90 px-2.5 py-1 font-medium text-white transition-colors hover:bg-indigo-500"
+              href={bulkTranscriptsUrl(
+                filteredJobs.map((job) => job.job_id),
+                bulkFormat,
+                bulkMerged
+              )}
+              download
+              title={
+                libraryQuery.trim()
+                  ? "Downloads only the transcripts matching your search"
+                  : "Downloads every completed transcript in your library"
+              }
+            >
+              Download {filteredJobs.length === jobs.length ? "all" : filteredJobs.length}
+              {bulkMerged ? " as one file" : ""}
+            </a>
+          </div>
+        )}
 
         <div className="transcript-job-list">
           {loadingJobs && <p className="reader-empty">Loading your transcripts…</p>}

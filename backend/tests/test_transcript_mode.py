@@ -889,3 +889,144 @@ def test_a_failed_delete_never_fails_the_job(tmp_path):
 
     assert any("Could not delete" in m for _, m in logs)
     assert ctx.storage.exists(ctx.job_relative("output.zip"))
+
+
+# ------------------------------------------------------ bulk download
+
+
+def _completed_job_with_transcript(title: str, *, text: str, url: str | None = "https://x.test/v") -> str:
+    """A completed job whose three transcript formats exist on disk."""
+    from app.database import get_session
+    from app.models import Job
+    from app.storage import get_storage
+
+    storage = get_storage()
+    session = get_session()
+    try:
+        job = Job(
+            job_type="transcript",
+            original_filename=title,
+            stored_source_filename="",
+            mode="transcript",
+            status="completed",
+            source_url=url,
+            options={},
+        )
+        session.add(job)
+        session.commit()
+        job_id = job.id
+    finally:
+        session.close()
+
+    storage.save_bytes(f"{job_id}/transcript/transcript.txt", text.encode())
+    storage.save_bytes(
+        f"{job_id}/transcript/transcript.json",
+        json.dumps({"language": "en", "segments": [{"start": 0.0, "end": 2.0, "text": text}]}).encode(),
+    )
+    storage.save_bytes(
+        f"{job_id}/transcript/subtitles.srt",
+        f"1\n00:00:00,000 --> 00:00:02,000\n{text}\n".encode(),
+    )
+    return job_id
+
+
+def test_bulk_zip_contains_one_file_per_job_named_by_title(client):
+    import io
+    import zipfile
+
+    a = _completed_job_with_transcript("How To Ship Fast", text="ship fast")
+    b = _completed_job_with_transcript("Lucky Block Tutorial", text="lucky block")
+
+    resp = client.get(f"/api/jobs/transcripts/bulk?ids={a},{b}&format=srt")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "application/zip"
+
+    names = sorted(zipfile.ZipFile(io.BytesIO(resp.content)).namelist())
+    assert names == sorted([f"how-to-ship-fast-{a[:8]}.srt", f"lucky-block-tutorial-{b[:8]}.srt"])
+
+
+def test_bulk_zip_skips_the_unready_and_says_so(client):
+    """One still-running job out of thirty must not sink the download."""
+    import io
+    import zipfile
+
+    from app.database import get_session
+    from app.models import Job
+
+    good = _completed_job_with_transcript("Done Video", text="done")
+    session = get_session()
+    try:
+        running = Job(
+            job_type="transcript", original_filename="Still Going", stored_source_filename="",
+            mode="transcript", status="transcribing", options={},
+        )
+        session.add(running)
+        session.commit()
+        running_id = running.id
+    finally:
+        session.close()
+
+    resp = client.get(f"/api/jobs/transcripts/bulk?ids={good},{running_id},not-a-job&format=txt")
+    assert resp.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    assert f"done-video-{good[:8]}.txt" in zf.namelist()
+    skipped = zf.read("skipped.txt").decode()
+    assert running_id in skipped and "not completed" in skipped
+    assert "not-a-job" in skipped and "no such job" in skipped
+
+
+def test_bulk_merged_txt_is_one_file_in_request_order(client):
+    first = _completed_job_with_transcript("Video One", text="alpha body")
+    second = _completed_job_with_transcript("Video Two", text="beta body", url=None)
+
+    resp = client.get(f"/api/jobs/transcripts/bulk?ids={first},{second}&format=txt&merged=true")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    assert "transcripts-merged-" in resp.headers["content-disposition"]
+
+    body = resp.text
+    assert "==== 1. Video One (https://x.test/v) ====" in body
+    assert "==== 2. Video Two ====" in body
+    assert body.index("alpha body") < body.index("beta body")
+
+
+def test_bulk_merged_json_carries_provenance_per_video(client):
+    a = _completed_job_with_transcript("JSON One", text="hello there")
+
+    resp = client.get(f"/api/jobs/transcripts/bulk?ids={a}&format=json&merged=true")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["count"] == 1
+    entry = payload["transcripts"][0]
+    assert entry["job_id"] == a
+    assert entry["title"] == "JSON One"
+    assert entry["transcript"]["segments"][0]["text"] == "hello there"
+
+
+def test_bulk_merged_srt_is_refused_not_corrupted(client):
+    """Concatenated SRT timelines all start at 00:00 — the output would be
+    invalid for the one thing SRT is for, so the API refuses instead."""
+    a = _completed_job_with_transcript("Subs", text="line")
+    resp = client.get(f"/api/jobs/transcripts/bulk?ids={a}&format=srt&merged=true")
+    assert resp.status_code == 400
+    assert "cannot be merged" in resp.json()["error"]["message"]
+
+
+def test_bulk_with_no_usable_jobs_is_a_404_not_an_empty_zip(client):
+    resp = client.get("/api/jobs/transcripts/bulk?ids=ghost-one,ghost-two&format=txt")
+    assert resp.status_code == 404
+    assert "no such job" in resp.json()["error"]["message"]
+
+
+def test_bulk_rejects_an_oversized_request(client):
+    ids = ",".join(f"job-{i}" for i in range(101))
+    resp = client.get(f"/api/jobs/transcripts/bulk?ids={ids}")
+    assert resp.status_code == 400
+    assert "limit is 100" in resp.json()["error"]["message"]
+
+
+def test_bulk_route_is_not_swallowed_by_the_job_id_route(client):
+    """/transcripts/bulk must never be parsed as job_id='transcripts'."""
+    resp = client.get("/api/jobs/transcripts/bulk?ids=nope")
+    assert resp.status_code == 404
+    assert "downloadable transcript" in resp.json()["error"]["message"]

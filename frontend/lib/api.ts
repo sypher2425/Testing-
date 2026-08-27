@@ -305,6 +305,20 @@ export function transcriptUrl(jobId: string, format: "txt" | "json" | "srt"): st
   return `${API_BASE_URL}/api/jobs/${jobId}/transcript?format=${format}`;
 }
 
+/** One download for a whole batch of transcripts. merged=false is a ZIP with
+ * one file per job in the chosen format; merged=true is a single combined
+ * .txt or .json (the server refuses merged SRT — concatenated subtitle
+ * timelines are corrupt for their only purpose). */
+export function bulkTranscriptsUrl(
+  jobIds: string[],
+  format: "txt" | "json" | "srt",
+  merged: boolean
+): string {
+  const params = new URLSearchParams({ ids: jobIds.join(","), format });
+  if (merged) params.set("merged", "true");
+  return `${API_BASE_URL}/api/jobs/transcripts/bulk?${params.toString()}`;
+}
+
 export async function listFrames(
   jobId: string,
   page = 1,

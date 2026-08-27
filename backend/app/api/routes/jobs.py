@@ -43,6 +43,7 @@ from app.utils.disk import ensure_enough_disk
 from app.utils.ffmpeg import FFmpegError, ffprobe
 from app.utils.filenames import is_safe_relative_path, sanitize_filename
 from app.utils.manifest_compat import normalize_frames
+from app.utils.timestamps import now_utc_iso
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -765,6 +766,146 @@ def list_jobs(
     )
     return JobListResponse(
         jobs=[_to_status_response(j, db) for j in jobs], total=total, page=page, page_size=page_size
+    )
+
+
+# One download for a whole batch of transcript jobs. Kept to a GET with a
+# comma-separated ids param so the frontend can hand the browser a plain
+# <a href> and the native download flow does the rest — 100 UUIDs is ~3.7KB
+# of query string, comfortably inside every practical URL limit.
+_TRANSCRIPT_FILE_FOR_FORMAT = {
+    "txt": "transcript/transcript.txt",
+    "json": "transcript/transcript.json",
+    "srt": "transcript/subtitles.srt",
+}
+_BULK_TRANSCRIPT_MAX_IDS = 100
+
+
+@router.get("/transcripts/bulk")
+def bulk_download_transcripts(
+    ids: str = Query(..., description="Comma-separated job IDs"),
+    format: str = Query("txt", pattern="^(txt|json|srt)$"),
+    merged: bool = Query(False, description="One combined file instead of a ZIP of many"),
+    db: Session = Depends(db_session),
+    storage: StorageBackend = Depends(get_storage),
+) -> Response:
+    """Every transcript from a batch in one download.
+
+    Two layouts. `merged=false` (default) is a ZIP with one file per job in
+    the chosen format, named by the job's title so the archive is readable
+    without cross-referencing IDs. `merged=true` is literally one file — the
+    batch concatenated into a single .txt with a header per video, or a
+    single .json array. SRT refuses to merge: subtitle timelines are
+    per-video, and concatenating them produces a file that is *corrupt* for
+    its only purpose, so that combination is rejected rather than honored.
+
+    Jobs that can't contribute (still running, failed, transcript missing)
+    are skipped and named in a skipped.txt inside the ZIP — a batch download
+    that fails outright because one of thirty jobs is still transcribing
+    would punish the ones that finished.
+    """
+    if merged and format == "srt":
+        raise bad_request(
+            "SRT files cannot be merged — each subtitle timeline starts at 00:00, so a "
+            "concatenation is not a valid SRT. Choose txt or json for a combined file, "
+            "or download SRT as a ZIP."
+        )
+
+    requested = [part.strip() for part in ids.split(",") if part.strip()]
+    # Dedupe while preserving the order the client sent — for a merged file
+    # that order is the reading order.
+    unique_ids = list(dict.fromkeys(requested))
+    if not unique_ids:
+        raise bad_request("Provide at least one job ID in `ids`")
+    if len(unique_ids) > _BULK_TRANSCRIPT_MAX_IDS:
+        raise bad_request(
+            f"Too many jobs in one download ({len(unique_ids)}); the limit is "
+            f"{_BULK_TRANSCRIPT_MAX_IDS}. Split the request."
+        )
+
+    transcript_rel = _TRANSCRIPT_FILE_FOR_FORMAT[format]
+    ready: list[Job] = []
+    skipped: list[tuple[str, str]] = []
+    for job_id in unique_ids:
+        job = db.get(Job, job_id)
+        if job is None:
+            skipped.append((job_id, "no such job"))
+        elif job.status != "completed":
+            skipped.append((job_id, f"not completed (status={job.status})"))
+        elif not storage.exists(f"{job_id}/{transcript_rel}"):
+            skipped.append((job_id, "no transcript on disk"))
+        else:
+            ready.append(job)
+
+    if not ready:
+        reasons = "; ".join(f"{jid[:8]}…: {why}" for jid, why in skipped[:5])
+        raise not_found(f"None of the requested jobs has a downloadable transcript ({reasons})")
+
+    stamp = datetime.now(timezone.utc).date().isoformat()
+
+    def member_name(job: Job) -> str:
+        # Title-based so the archive reads like a library, with the ID's first
+        # 8 chars appended because two videos can share a title.
+        return f"{_slugify(job.original_filename)}-{job.id[:8]}.{format}"
+
+    if merged:
+        if format == "json":
+            transcripts = []
+            for job in ready:
+                data = json.loads(storage.get(f"{job.id}/{transcript_rel}").read_text(encoding="utf-8"))
+                transcripts.append(
+                    {
+                        "job_id": job.id,
+                        "title": job.original_filename,
+                        "source_url": job.source_url,
+                        "transcript": data,
+                    }
+                )
+            payload = json.dumps(
+                {"generated_at": now_utc_iso(), "count": len(transcripts), "transcripts": transcripts},
+                indent=2,
+            )
+            return Response(
+                content=payload,
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f'attachment; filename="transcripts-merged-{stamp}.json"'
+                },
+            )
+
+        blocks = []
+        for index, job in enumerate(ready, start=1):
+            text = storage.get(f"{job.id}/{transcript_rel}").read_text(encoding="utf-8").strip()
+            header = f"==== {index}. {job.original_filename}"
+            if job.source_url:
+                header += f" ({job.source_url})"
+            header += " ===="
+            blocks.append(f"{header}\n\n{text}\n")
+        return Response(
+            content="\n\n".join(blocks),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="transcripts-merged-{stamp}.txt"'
+            },
+        )
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    tmp.close()
+    with zipfile.ZipFile(tmp.name, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for job in ready:
+            zf.write(storage.get(f"{job.id}/{transcript_rel}"), member_name(job))
+        if skipped:
+            zf.writestr(
+                "skipped.txt",
+                "These requested jobs are not in this archive:\n\n"
+                + "\n".join(f"{jid}: {why}" for jid, why in skipped)
+                + "\n",
+            )
+    return FileResponse(
+        tmp.name,
+        media_type="application/zip",
+        filename=f"transcripts-{len(ready)}-{stamp}.zip",
+        background=BackgroundTask(lambda: os.unlink(tmp.name)),
     )
 
 
