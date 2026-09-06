@@ -1,0 +1,48 @@
+{
+  "job_id": "v2-1-fixture",
+  "dataset_schema_version": "2.1",
+  "original_filename": "clip.mp4",
+  "mode": "adaptive",
+  "video": {"duration_seconds": 49.0, "has_audio": true},
+  "frame_count": 30,
+  "frame_counts": {"adaptive": 30, "opening_dense": 32, "key_events": 0},
+  "total_frame_count": 62,
+  "extraction_params": {
+    "mode": "adaptive",
+    "opening_dense": {
+      "enabled": true,
+      "duration_seconds": 8.0,
+      "interval_seconds": 0.25,
+      "source": "default_configuration"
+    }
+  },
+  "identity": {
+    "dataset_id": "v2-1-fixture",
+    "platform": "tiktok",
+    "platform_post_id": "1",
+    "canonical_url": "https://www.tiktok.com/@x/video/1",
+    "exported_at": "2026-07-24T09:00:00+00:00"
+  },
+  "posting_context": {
+    "platform": {"value": "tiktok", "status": "success", "source": "auto"},
+    "posted_at": {"value": "2026-07-23", "status": "success", "source": "auto"}
+  },
+  "performance": {
+    "platform": "tiktok",
+    "source_url": "https://www.tiktok.com/@x/video/1",
+    "view_count": 285900,
+    "fields_status": {
+      "view_count": {"status": "success", "source": "auto", "precision": "exact"}
+    }
+  },
+  "performance_snapshot": {
+    "fetched_at": "2026-07-24T09:00:00+00:00",
+    "metric_window": "lifetime_at_capture",
+    "source": "yt_dlp",
+    "platform": "tiktok"
+  },
+  "processing": {
+    "started_at": "2026-07-24T08:58:00",
+    "manifest_generated_at": "2026-07-24T09:00:00+00:00"
+  }
+}

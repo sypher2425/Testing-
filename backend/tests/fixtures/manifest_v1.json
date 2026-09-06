@@ -1,0 +1,26 @@
+{
+  "job_id": "v1-fixture",
+  "original_filename": "clip.mp4",
+  "mode": "adaptive",
+  "video": {
+    "duration_seconds": 30.0,
+    "width": 1080,
+    "height": 1920,
+    "fps": 30.0,
+    "codec": "h264",
+    "has_audio": true
+  },
+  "language": "en",
+  "frame_count": 12,
+  "extraction_params": {
+    "target_frames": 80,
+    "frame_format": "jpeg"
+  },
+  "processing": {
+    "started_at": "2025-11-02T18:22:10.500000",
+    "manifest_generated_at": "2025-11-02T18:24:55.100000"
+  },
+  "files": [
+    {"path": "source/video.mp4", "description": "Original uploaded video file", "size_bytes": 1000}
+  ]
+}

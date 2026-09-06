@@ -1,0 +1,31 @@
+{
+  "job_id": "v2-0-fixture",
+  "dataset_schema_version": "2.0",
+  "original_filename": "clip.mp4",
+  "mode": "adaptive",
+  "video": {"duration_seconds": 49.0, "has_audio": true},
+  "frame_count": 30,
+  "frame_counts": {"adaptive": 30, "opening_dense": 32, "key_events": 0},
+  "extraction_params": {
+    "mode": "adaptive",
+    "opening_dense_enabled": true,
+    "opening_dense_duration": 8.0,
+    "opening_dense_interval": 0.25
+  },
+  "posting_context": {
+    "platform": {"value": "tiktok", "status": "success", "source": "auto"},
+    "posted_at": {"value": "2026-07-23", "status": "success", "source": "auto"}
+  },
+  "performance": {
+    "platform": "tiktok",
+    "source_url": "https://www.tiktok.com/@x/video/1",
+    "view_count": 285900,
+    "fields_status": {
+      "view_count": {"status": "success", "source": "auto", "precision": "exact"}
+    }
+  },
+  "processing": {
+    "started_at": "2026-07-20T10:00:19.668895",
+    "manifest_generated_at": "2026-07-20T10:02:41.000000+00:00"
+  }
+}
