@@ -194,6 +194,33 @@ class GenerateMetadataStep(PipelineStep):
                 "reason": "Requires manual annotation (or a future OCR/AI pass)",
             }
 
+        # Regenerating storyboards on a completed job must preserve its existing
+        # analysis, even when the reconstruction context lacks shared outputs.
+        analyses = ctx.shared.get("analyses") or {}
+        timeline_path = ctx.storage.get(ctx.job_relative("analysis", "timeline.json"))
+        if not analyses and timeline_path.is_file():
+            try:
+                timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+                analyses = {key: value for key, value in timeline.items() if key not in {"items", "transcript"}}
+            except (OSError, ValueError):
+                ctx.warning("Existing analysis timeline could not be read while rebuilding the manifest")
+        for relative, description in (
+            ("analysis/timeline.json", "Timestamped local OCR and visual evidence with full transcript, confidence, boxes, coverage and provenance"),
+            ("analysis/report.md", "Combined readable report: complete transcript and sampled visual evidence"),
+            ("analysis/report.txt", "UTF-8 combined report for reading or importing into an AI"),
+        ):
+            relative_path = ctx.job_relative(*relative.split("/"))
+            if ctx.storage.exists(relative_path):
+                files.append({"path": relative, "description": description,
+                              "size_bytes": ctx.storage.size_of(relative_path)})
+        if analyses.get("ocr"):
+            ocr_status = analyses["ocr"]
+            content_status["onscreen_text"] = {
+                "status": ocr_status.get("status", "skipped"), "source": "local_ocr",
+                "path": "analysis/timeline.json", "text_lines": ocr_status.get("text_lines", 0),
+                "reason": ocr_status.get("reason") or "OCR covers selected sampled frames; see timeline coverage",
+            }
+
         # content/audio.json — pacing analysis from the transcript
         audio_stats = compute_audio_stats(
             transcript if not transcript.get("skipped") else transcript,
@@ -290,17 +317,40 @@ class GenerateMetadataStep(PipelineStep):
         }
         extraction_params: dict = {
             k: ctx.options.get(k)
-            for k in ("interval_ms", "target_frames", "frame_format", "frame_max_dim")
+            for k in ("interval_ms", "target_frames", "frame_format", "frame_max_dim", "frame_budget", "processing_profile")
             if k in ctx.options
         }
         extraction_params["mode"] = mode
         extraction_params["opening_dense"] = dense_config
         extraction_params["key_events"] = key_events_config
+        # Preserve actual selection/budget reductions, not only the upload
+        # request. Existing manifests supply these when a storyboard-only
+        # rebuild reconstructs a context without extraction scratch values.
+        previous_params = {}
+        previous_manifest_data = {}
+        previous_manifest = ctx.storage.get(ctx.job_relative("manifest.json"))
+        if previous_manifest.is_file():
+            try:
+                previous_manifest_data = json.loads(previous_manifest.read_text(encoding="utf-8"))
+                previous_params = previous_manifest_data.get("extraction_params") or {}
+            except (OSError, ValueError):
+                pass
+        if ctx.shared.get("opening_dense_config") is None and previous_params.get("opening_dense"):
+            dense_config = previous_params["opening_dense"]
+            extraction_params["opening_dense"] = dense_config
+        if ctx.shared.get("key_events_config") is None and previous_params.get("key_events"):
+            extraction_params["key_events"] = previous_params["key_events"]
+        for key in ("frame_range", "visual_scan", "adaptive_config", "burst_config"):
+            value = ctx.shared.get(key, previous_params.get(key))
+            if value is not None:
+                extraction_params[key] = value
+        if extraction_params.get("frame_range"):
+            extraction_params["frame_budget"] = extraction_params["frame_range"].get("frame_budget", extraction_params.get("frame_budget"))
         # Interval modes may widen their interval to keep whole-video coverage
         # within MAX_FRAMES. Record what actually ran, not just what was asked
         # for, so a consumer never mistakes 0.35s sampling for the 0.2s
         # requested.
-        interval_config = ctx.shared.get("interval_config")
+        interval_config = ctx.shared.get("interval_config") or previous_params.get("interval")
         if interval_config:
             extraction_params["interval"] = interval_config
             extraction_params["interval_ms"] = round(
@@ -380,6 +430,7 @@ class GenerateMetadataStep(PipelineStep):
                 "last_rebuilt_at": ctx.shared.get("rebuilt_at"),
             },
             "extraction_report": ctx.shared.get("stage_reports") or [],
+            "frame_decoding": ctx.shared.get("frame_decoding") or previous_manifest_data.get("frame_decoding"),
             "identity": identity_block,
             "performance": performance,
             "performance_snapshot": performance_snapshot,
@@ -392,7 +443,8 @@ class GenerateMetadataStep(PipelineStep):
             "events_count": len(events),
             "analysis_summary": build_analysis_summary(events, audio_stats),
             "storyboards": storyboard_summary,
-            "analyses": {},
+            "analyses": analyses,
+            "reused_from_job_id": ctx.shared.get("reused_from_job_id") or previous_manifest_data.get("reused_from_job_id"),
         }
 
         # R1.5: run the validator BEFORE writing the manifest, so the

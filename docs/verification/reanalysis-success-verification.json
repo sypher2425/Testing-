@@ -1,0 +1,90 @@
+{
+  "jobId": "d0d5a2d0-2b03-433d-b774-fe2cb6c61ede",
+  "originalUnchanged": true,
+  "jobStatus": "completed",
+  "completedAt": "2026-09-06T03:08:50.505078+00:00",
+  "elapsedSeconds": 23.069,
+  "ocr": {
+    "enabled": true,
+    "status": "success",
+    "engine": "RapidOCR ONNX CPU",
+    "model": "RapidOCR-1.4.4-bundled-PP-OCR",
+    "selected_frames": 62,
+    "processed_frames": 62,
+    "cache_hits": 62,
+    "text_lines": 1200
+  },
+  "vision": {
+    "enabled": true,
+    "status": "success",
+    "engine": "Ollama local",
+    "model": "qwen3.5:4b",
+    "selected_frames": 4,
+    "processed_frames": 4,
+    "cache_hits": 0,
+    "model_digest": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd"
+  },
+  "observations": [
+    {
+      "timestamp": 0.015,
+      "summary": "A Roblox game screenshot showing a vibrant, cartoonish world with a player character in an orange outfit. The interface displays various stats and controls for interacting with the environment.",
+      "generation": {
+        "schema_version": "concise-observation-1.1",
+        "attempts": 1,
+        "compact_retry": false,
+        "done_reason": "stop",
+        "output_tokens": 164
+      }
+    },
+    {
+      "timestamp": 0.265,
+      "summary": "A Roblox game screen showing a character in a colorful town with UI elements for upgrades and currency.",
+      "generation": {
+        "schema_version": "concise-observation-1.1",
+        "attempts": 1,
+        "compact_retry": false,
+        "done_reason": "stop",
+        "output_tokens": 236
+      }
+    },
+    {
+      "timestamp": 4.681,
+      "summary": "A gameplay screen from a mobile game shows upgrade menus for 'Cash' and 'Kick'. A streamer's face is visible in the top-left corner. The UI displays current stats, costs, and purchase options.",
+      "generation": {
+        "schema_version": "concise-observation-1.1",
+        "attempts": 1,
+        "compact_retry": false,
+        "done_reason": "stop",
+        "output_tokens": 248
+      }
+    },
+    {
+      "timestamp": 9.348,
+      "summary": "A gameplay screen from a mobile game shows a 'Rebirth' interface with a streamer in the corner. The UI indicates costs and rewards for resetting progress.",
+      "generation": {
+        "schema_version": "concise-observation-1.1",
+        "attempts": 1,
+        "compact_retry": false,
+        "done_reason": "stop",
+        "output_tokens": 215
+      }
+    }
+  ],
+  "errors": [],
+  "downloads": [
+    {
+      "mode": "frames",
+      "filename": "d0d5a2d0-2b03-433d-b774-fe2cb6c61ede-ai-dataset-every-frame.zip",
+      "bytes": 4716613
+    },
+    {
+      "mode": "storyboards",
+      "filename": "d0d5a2d0-2b03-433d-b774-fe2cb6c61ede-ai-dataset-adaptive-storyboards.zip",
+      "bytes": 6016640
+    }
+  ],
+  "mobile": {
+    "width": 390,
+    "scrollWidth": 390
+  }
+}

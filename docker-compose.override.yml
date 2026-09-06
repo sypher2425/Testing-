@@ -1,0 +1,19 @@
+# NVIDIA GPU support for this Windows/WSL2 workstation.
+# CPU-only deployment: docker compose -f docker-compose.yml up -d --build
+services:
+  worker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

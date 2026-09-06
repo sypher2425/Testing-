@@ -17,9 +17,14 @@ import type { CreateJobOptions, JobSource, ManualPerformanceOverrides } from "@/
 const DEFAULT_OPTIONS: CreateJobOptions = {
   mode: "adaptive",
   interval_ms: 1000,
-  target_frames: 80,
+  target_frames: 300,
   frame_format: "jpeg",
   frame_max_dim: 1280,
+  frame_budget: 2000,
+  processing_profile: "balanced",
+  source_preference: "captions_first",
+  ocr_enabled: true,
+  vision_enabled: false,
 };
 
 const APP_MODES = [
@@ -27,7 +32,7 @@ const APP_MODES = [
     value: "video" as const,
     number: "01",
     label: "Dataset",
-    description: "Frames, transcript and manifest",
+    description: "Frames, speech and visual evidence",
   },
   {
     value: "transcript" as const,
@@ -64,9 +69,10 @@ function HomeContent() {
   const [batchItems, setBatchItems] = useState<BatchSubmissionItem[]>([]);
   const [sourceResetKey, setSourceResetKey] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
 
   async function handleUpload() {
-    if (!sources.length || uploading) return;
+    if (!sources.length || uploading || optionsError) return;
     const submittedSources = [...sources];
     setUploading(true);
     setBatchItems(
@@ -140,11 +146,11 @@ function HomeContent() {
             From moving image to <span>structured intelligence.</span>
           </h1>
           <p className="hero-description">
-            Extract the frames, speech, metadata, and visual storyboards that AI systems need —
-            with a private pipeline that stays on your machine.
+            Turn video into searchable speech, screen text, visual evidence, and readable
+            reports. Choose the detail you need, with free models running on your machine.
           </p>
           <div className="hero-tags" aria-label="Key capabilities">
-            <span>Scene-aware</span>
+            <span>Free local AI</span>
             <span>Timestamped</span>
             <span>AI-ready</span>
           </div>
@@ -240,10 +246,10 @@ function HomeContent() {
                     <span>02</span>
                     <div>
                       <h3>Shape the output</h3>
-                      <p>Adaptive selection is the best fit for most AI workflows.</p>
+                      <p>Start with a speed preset, then focus detail on what matters.</p>
                     </div>
                   </div>
-                  <ModeSelector options={options} onChange={setOptions} />
+                  <ModeSelector options={options} onChange={setOptions} sources={sources} disabled={uploading} onValidationChange={setOptionsError} />
                 </div>
 
                 {sources.length <= 1 ? (
@@ -264,7 +270,7 @@ function HomeContent() {
                         ? "Large files stream one at a time for reliable disk checks."
                         : "Links are submitted four at a time; processing remains safely queued."}
                     </p>
-                    <button className="btn-primary" disabled={!sources.length} onClick={handleUpload}>
+                    <button className="btn-primary" disabled={!sources.length || uploading || Boolean(optionsError)} onClick={handleUpload}>
                       {sources.length > 1
                         ? `Queue ${sources.length} datasets`
                         : sources[0]?.kind === "url"
@@ -288,6 +294,11 @@ function HomeContent() {
             <div className="output-item">
               <span className="output-icon">IMG</span>
               <div><strong>Smart frames</strong><small>Scene-aware visual sampling</small></div>
+              <span className="output-check">✓</span>
+            </div>
+            <div className="output-item">
+              <span className="output-icon">AI</span>
+              <div><strong>Evidence timeline</strong><small>Search speech, screen text & visuals</small></div>
               <span className="output-check">✓</span>
             </div>
             <div className="output-item">

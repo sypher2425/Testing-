@@ -1,0 +1,39 @@
+{
+  "verified_at": "2026-09-06T03:15:59.158Z",
+  "frontend_status": 200,
+  "capabilities": {
+    "version": "0.2.0",
+    "max_frames": 20000,
+    "min_interval_ms": 17,
+    "default_target_frames": 300,
+    "gpu": {
+      "available": true,
+      "device": "NVIDIA CUDA"
+    },
+    "transcription": {
+      "model": "small",
+      "device": "cuda",
+      "batch_size": 4
+    },
+    "updated_at": 1788664504.2327423,
+    "analysis": {
+      "ocr_available": true,
+      "vision_available": true,
+      "vision_model": "qwen3.5:4b"
+    }
+  },
+  "worker_source_checks": [
+    {
+      "path": "app/utils/frame_decode.py",
+      "matches": true
+    },
+    {
+      "path": "app/utils/local_analysis.py",
+      "matches": true
+    },
+    {
+      "path": "app/api/routes/jobs.py",
+      "matches": true
+    }
+  ]
+}

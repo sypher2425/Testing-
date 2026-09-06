@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    APP_VERSION: str = "0.1.0"
+    APP_VERSION: str = "0.2.0"
 
     # Storage
     DATA_DIR: str = "/data"
@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     WHISPER_MODEL_SIZE: str = "small"
     WHISPER_DEVICE: str = "cpu"
     WHISPER_COMPUTE_TYPE: str = "int8"
+    WHISPER_BATCH_SIZE: int = Field(default=4, ge=1, le=32)
+    WHISPER_CPU_THREADS: int = Field(default=4, ge=1, le=32)
+    TRANSCRIPT_CACHE_ENABLED: bool = True
+    ANALYSIS_CACHE_RETENTION_HOURS: int = 168
     ENABLE_DIARIZATION: bool = False
     HF_TOKEN: str = ""
     # Where faster-whisper/huggingface_hub caches model weights. Mounted as a
@@ -69,12 +73,29 @@ class Settings(BaseSettings):
     WARM_MODEL_ON_STARTUP: bool = True
 
     # Frame extraction
-    MAX_FRAMES: int = 2000
-    DEFAULT_TARGET_FRAMES: int = 80
+    MAX_FRAMES: int = 20000
+    DEFAULT_TARGET_FRAMES: int = 300
     ADAPTIVE_MIN_FRAMES: int = 30
-    ADAPTIVE_MAX_FRAMES: int = 150
+    ADAPTIVE_MAX_FRAMES: int = 2000
     FRAME_MAX_DIM_DEFAULT: int = 1280
     FRAME_JPEG_QUALITY: int = 85
+    FFMPEG_HWACCEL: str = "auto"
+
+    # Local evidence analysis. OCR runs on CPU; vision uses a local Ollama server.
+    OCR_MAX_FRAMES_FAST: int = 80
+    OCR_MAX_FRAMES_BALANCED: int = 240
+    OCR_MAX_FRAMES_DETAILED: int = 600
+    OCR_MAX_DIM: int = 1600
+    OCR_MIN_CONFIDENCE: float = 0.5
+    OCR_TIMEOUT_SECONDS: int = 1800
+    OCR_CPU_THREADS: int = 2
+    LOCAL_ANALYSIS_CACHE_DIR: str = ""
+    OLLAMA_BASE_URL: str = "http://ollama:11434"
+    OLLAMA_VISION_MODEL: str = "qwen3.5:4b"
+    OLLAMA_TIMEOUT_SECONDS: int = 120
+    VISION_MAX_FRAMES_FAST: int = 4
+    VISION_MAX_FRAMES_BALANCED: int = 12
+    VISION_MAX_FRAMES_DETAILED: int = 24
 
     # Job lifecycle
     RETENTION_HOURS: int = 72

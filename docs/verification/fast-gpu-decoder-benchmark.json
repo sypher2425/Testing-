@@ -1,0 +1,76 @@
+{
+  "started_at_utc": "2026-09-06T03:13:59.265843+00:00",
+  "source": "/data/jobs/ea463e9d-8033-4946-a571-9adade98a0fb/source/video.mp4",
+  "source_bytes": 1396214999,
+  "source_duration_seconds": 1708.566667,
+  "source_codec": "av1",
+  "source_width": 2560,
+  "source_height": 1440,
+  "source_fps": 60.0,
+  "short_comparisons": [],
+  "status": "complete",
+  "long_extraction": {
+    "options": {
+      "mode": "adaptive",
+      "interval_ms": 1000,
+      "target_frames": 80,
+      "frame_budget": 2000,
+      "processing_profile": "fast",
+      "source_preference": "whisper_only",
+      "range_start_seconds": 0.0,
+      "range_end_seconds": null,
+      "frame_bursts": [],
+      "analysis_objective": "",
+      "ocr_enabled": false,
+      "vision_enabled": false,
+      "frame_format": "jpeg",
+      "frame_max_dim": 1280,
+      "opening_dense_enabled": false,
+      "opening_dense_duration": null,
+      "opening_dense_interval": null,
+      "storyboard_enabled": true,
+      "storyboard_columns": null,
+      "storyboard_tiles_per_sheet": null,
+      "storyboard_include_captions": true
+    },
+    "existing_transcript_used": true,
+    "comparison_scope": "Full source, fast prescan and main adaptive frame extraction only. Opening dense disabled. Existing transcript reused; no transcription or download included.",
+    "seconds": 52.426,
+    "frame_count": 80,
+    "frame_counts_by_category": {
+      "adaptive": 80,
+      "opening_dense": 0,
+      "key_events": 0
+    },
+    "decode_stats": {
+      "hardware_fallbacks": 0,
+      "hardware_bypasses": {
+        "keyframes_only": 1
+      },
+      "requested_hwaccel": "auto",
+      "successful_decode_operations": {
+        "software_default": 1,
+        "av1_cuvid": 80
+      }
+    },
+    "visual_scan": {
+      "decoder": "ffmpeg",
+      "profile": "fast",
+      "sampled_frames": 517,
+      "requested_interval_seconds": 2.0,
+      "max_dimension": 320,
+      "keyframes_only": true,
+      "candidate_count": 516,
+      "signals": [
+        "pixel_change",
+        "edge_change"
+      ]
+    },
+    "warnings": [],
+    "first_timestamp": 0.0,
+    "last_timestamp": 1674.466667,
+    "output_bytes": 7373773
+  },
+  "source_unchanged": true,
+  "finished_at_utc": "2026-09-06T03:14:51.696412+00:00"
+}

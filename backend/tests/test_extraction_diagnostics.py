@@ -20,6 +20,11 @@ REHYDRATION = (
     "version using yt-dlp -U"
 )
 
+UNEXPECTED_WEBPAGE = (
+    "ERROR: [TikTok] 7581785298988764437: Unexpected response from webpage request; "
+    "please report this issue. Confirm you are on the latest version using yt-dlp -U"
+)
+
 
 @pytest.fixture()
 def client():
@@ -40,6 +45,20 @@ def test_the_same_page_means_something_different_with_cookies_in_play():
     so authenticated context reads as a challenge, not a layout change."""
     assert ee.classify(REHYDRATION, used_cookies=True).code == ee.BOT_CHALLENGE
     assert ee.classify(REHYDRATION, used_cookies=False).code == ee.LAYOUT_CHANGED
+
+
+def test_unexpected_tiktok_maintenance_page_is_not_an_unknown_failure():
+    """Exact failure from a public post that returned TikTok's maintenance
+    page to the worker while its oEmbed endpoint still confirmed the post."""
+    assert ee.classify(UNEXPECTED_WEBPAGE, used_cookies=True).code == ee.BOT_CHALLENGE
+    assert ee.classify(UNEXPECTED_WEBPAGE, used_cookies=False).code == ee.BOT_CHALLENGE
+
+    verdict = ee.reconcile(
+        ee.classify(UNEXPECTED_WEBPAGE, used_cookies=True),
+        ee.classify(UNEXPECTED_WEBPAGE, used_cookies=False),
+    )
+    assert verdict.code == ee.EXTRACTION_BLOCKED
+    assert "upload" in verdict.message.lower()
 
 
 @pytest.mark.parametrize(

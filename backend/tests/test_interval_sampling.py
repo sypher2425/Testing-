@@ -20,12 +20,12 @@ from app.pipeline.steps.extract_frames import (
 
 
 def test_short_video_at_0_2s_is_not_widened():
-    """A 30s clip at 0.2s is 151 frames — well inside the cap."""
+    """A 30s clip at 0.2s is 150 frames; EOF is not a source frame."""
     plan = resolve_interval(duration=30.0, requested_interval=0.2, cap=2000)
     assert plan["widened"] is False
     assert plan["effective_interval_seconds"] == 0.2
     assert plan["reason"] is None
-    assert plan["frame_count"] == 151
+    assert plan["frame_count"] == 150
 
 
 def test_exactly_at_the_cap_is_not_widened():
@@ -103,7 +103,7 @@ def test_no_cap_means_no_widening():
 def test_per_second_mode_unchanged_for_normal_videos():
     plan = resolve_interval(duration=120.0, requested_interval=1.0, cap=2000)
     assert plan["widened"] is False
-    assert plan["frame_count"] == 121
+    assert plan["frame_count"] == 120
 
 
 # --------------------------------------------------------- step-level wiring

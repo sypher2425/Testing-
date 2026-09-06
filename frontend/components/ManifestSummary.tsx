@@ -33,10 +33,17 @@ export default function ManifestSummary({ jobId }: { jobId: string }) {
   if (!manifest) return <p className="text-sm text-slate-500">Loading manifest…</p>;
 
   const totalBytes = manifest.files.reduce((sum, f) => sum + f.size_bytes, 0);
+  const params = manifest.extraction_params;
+  const range = params.frame_range && typeof params.frame_range === "object" ? params.frame_range as Record<string, unknown> : null;
+  const interval = params.interval && typeof params.interval === "object" ? params.interval as Record<string, unknown> : null;
+  const requestedInterval = typeof interval?.requested_interval_seconds === "number" ? interval.requested_interval_seconds
+    : typeof params.requested_interval_ms === "number" ? params.requested_interval_ms / 1000 : null;
+  const actualFps = typeof range?.actual_average_fps === "number" ? range.actual_average_fps
+    : typeof interval?.actual_average_fps === "number" ? interval.actual_average_fps : null;
 
   return (
     <div className="card p-4">
-      <h3 className="mb-3 text-sm font-medium text-slate-300">manifest.json summary</h3>
+      <h3 className="mb-3 text-sm font-medium text-slate-300">Dataset summary</h3>
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">
         <div>
           <dt className="text-xs text-slate-500">Duration</dt>
@@ -57,13 +64,25 @@ export default function ManifestSummary({ jobId }: { jobId: string }) {
           <dd>{manifest.extraction_mode}</dd>
         </div>
         <div>
-          <dt className="text-xs text-slate-500">Frame count</dt>
+          <dt className="text-xs text-slate-500">Main frame count</dt>
           <dd>{manifest.frame_count}</dd>
         </div>
         <div>
           <dt className="text-xs text-slate-500">Dataset size</dt>
           <dd>{formatBytes(totalBytes)}</dd>
         </div>
+        {requestedInterval !== null && requestedInterval > 0 && <div>
+          <dt className="text-xs text-slate-500">Requested regular FPS</dt>
+          <dd>{(1 / requestedInterval).toLocaleString(undefined, { maximumFractionDigits: 2 })}</dd>
+        </div>}
+        {actualFps !== null && <div>
+          <dt className="text-xs text-slate-500">Actual main average FPS</dt>
+          <dd>{actualFps.toLocaleString(undefined, { maximumFractionDigits: 2 })}</dd>
+        </div>}
+        {typeof range?.start_seconds === "number" && typeof range?.end_seconds === "number" && <div>
+          <dt className="text-xs text-slate-500">Frame range on source</dt>
+          <dd>{range.start_seconds.toFixed(1)}–{range.end_seconds.toFixed(1)}s</dd>
+        </div>}
       </dl>
 
       <button

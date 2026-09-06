@@ -71,7 +71,7 @@ def test_create_job_names_the_invalid_numeric_option(client):
 
 def test_create_job_succeeds_and_enqueues(client):
     with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
-        "app.tasks.process_job.delay"
+        "app.tasks.process_job.apply_async"
     ) as mock_delay:
         resp = client.post(
             "/api/jobs",
@@ -81,7 +81,7 @@ def test_create_job_succeeds_and_enqueues(client):
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
     assert job_id
-    mock_delay.assert_called_once_with(job_id, retry=False)
+    mock_delay.assert_called_once_with(args=(job_id,), retry=False)
 
     status_resp = client.get(f"/api/jobs/{job_id}")
     assert status_resp.status_code == 200
@@ -108,7 +108,7 @@ def test_create_job_rejects_corrupt_file(client):
 
 def test_download_before_completion_is_rejected(client):
     with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
-        "app.tasks.process_job.delay"
+        "app.tasks.process_job.apply_async"
     ):
         create_resp = client.post(
             "/api/jobs",
@@ -123,7 +123,7 @@ def test_download_before_completion_is_rejected(client):
 
 def test_frame_path_traversal_is_rejected(client):
     with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
-        "app.tasks.process_job.delay"
+        "app.tasks.process_job.apply_async"
     ):
         create_resp = client.post(
             "/api/jobs",
@@ -163,14 +163,14 @@ def test_create_job_rejects_non_http_url(client):
 
 
 def test_create_job_with_url_succeeds_and_defers_probe(client):
-    with patch("app.tasks.process_job.delay") as mock_delay:
+    with patch("app.tasks.process_job.apply_async") as mock_delay:
         resp = client.post(
             "/api/jobs",
             data={"mode": "adaptive", "url": "https://youtu.be/xyz", "manual_view_count": "500"},
         )
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
-    mock_delay.assert_called_once_with(job_id, retry=False)
+    mock_delay.assert_called_once_with(args=(job_id,), retry=False)
 
     status_resp = client.get(f"/api/jobs/{job_id}")
     assert status_resp.status_code == 200
@@ -181,14 +181,14 @@ def test_create_job_with_url_succeeds_and_defers_probe(client):
 
 
 def test_create_research_job_succeeds_and_enqueues(client):
-    with patch("app.tasks.process_job.delay") as mock_delay:
+    with patch("app.tasks.process_job.apply_async") as mock_delay:
         resp = client.post(
             "/api/jobs/research",
             json={"query": "roblox animation tips", "result_count": 10, "sort_mode": "newest", "min_views": 1000},
         )
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
-    mock_delay.assert_called_once_with(job_id, retry=False)
+    mock_delay.assert_called_once_with(args=(job_id,), retry=False)
 
     status_resp = client.get(f"/api/jobs/{job_id}")
     body = status_resp.json()
@@ -214,7 +214,7 @@ def test_queue_position_counts_only_older_unfinished_jobs(client):
         cleanup.close()
 
     with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
-        "app.tasks.process_job.delay"
+        "app.tasks.process_job.apply_async"
     ):
         first = client.post(
             "/api/jobs",
@@ -253,7 +253,7 @@ def test_create_research_job_rejects_bad_params(client):
 
 
 def test_research_job_download_rejects_non_zip_assets(client):
-    with patch("app.tasks.process_job.delay"):
+    with patch("app.tasks.process_job.apply_async"):
         resp = client.post("/api/jobs/research", json={"query": "test topic"})
     job_id = resp.json()["job_id"]
 
@@ -321,7 +321,7 @@ def test_query_strings_the_frontend_actually_builds_are_accepted(client, label, 
     posted hand-written params, so a form state the UI can genuinely produce
     was never exercised against the schema."""
     with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
-        "app.tasks.process_job.delay"
+        "app.tasks.process_job.apply_async"
     ):
         resp = client.post(
             f"/api/jobs/upload?filename=a.mp4&{query}",
@@ -335,7 +335,7 @@ def test_rejected_options_name_the_offending_field(client):
     """A cleared number box used to post 0 and come back as a bare "Invalid
     job options", which says nothing about which box to fix."""
     with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
-        "app.tasks.process_job.delay"
+        "app.tasks.process_job.apply_async"
     ):
         resp = client.post(
             "/api/jobs/upload?filename=a.mp4&mode=adaptive&interval_ms=1000"
@@ -346,7 +346,7 @@ def test_rejected_options_name_the_offending_field(client):
     assert resp.status_code == 422
     message = resp.json()["error"]["message"]
     assert "target_frames" in message
-    assert "greater than or equal to 10" in message
+    assert "greater than or equal to 30" in message
     assert "got 0" in message
 
 
@@ -368,7 +368,7 @@ def test_broker_down_fails_fast_without_stranding_a_queued_job(client):
         session.close()
 
     with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
-        "app.tasks.process_job.delay",
+        "app.tasks.process_job.apply_async",
         side_effect=OperationalError("Error -2 connecting to redis:6379."),
     ):
         started = time.monotonic()

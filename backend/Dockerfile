@@ -18,6 +18,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Optional CUDA runtime for this machine's NVIDIA worker. The base image remains
+# usable on CPU hosts; enable via ENABLE_CUDA=true at build time.
+ARG ENABLE_CUDA=false
+RUN if [ "$ENABLE_CUDA" = "true" ]; then \
+      pip install --no-cache-dir nvidia-cublas-cu12==12.8.4.1 nvidia-cudnn-cu12==9.10.2.21; \
+    fi
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib
+
 # Optional: bake the Whisper weights into the image so the container never
 # needs to download them at runtime (useful for offline/air-gapped hosts).
 # Off by default — the `whisper_cache` volume in docker-compose.yml already

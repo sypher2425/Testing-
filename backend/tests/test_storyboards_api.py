@@ -205,11 +205,11 @@ def test_ai_dataset_frames_mode_is_minimal_and_has_no_storyboards(client):
         "comments/extraction_status.json": b'{"status": "success"}',
         "frames/0000.000.jpg": b"frame-a",
         "frames/opening_dense/0000.250.jpg": b"frame-b",
+        "metadata/frames.json": b"[]",
     }
     excluded = {
         "manifest.json": b"{}",
         "events.json": b"[]",
-        "metadata/frames.json": b"[]",
         "metadata/validation_report.json": b"{}",
         "transcript/transcript.txt": b"hello",
         "transcript/transcript.srt": b"hello",
@@ -248,6 +248,84 @@ def test_ai_dataset_storyboard_mode_excludes_every_individual_frame(client):
     }
     assert not any(name.startswith("frames/") for name in names)
     assert "storyboard_manifest.json" not in names
+
+
+def test_ai_dataset_storyboards_include_only_observed_frame_evidence(client):
+    import zipfile
+
+    from app.storage import get_storage
+
+    job_id = _completed_job_with_storyboards()
+    storage = get_storage()
+    artifacts = {
+        "frames/ocr.jpg": b"readable-source-image",
+        "frames/opening_dense/vision.jpg": b"visual-observation-source-image",
+        "frames/unobserved.jpg": b"unobserved-source-image",
+        "analysis/report.md": b"# Evidence report",
+        "analysis/report.txt": b"Evidence report",
+        "metadata/frames.json": b"[]",
+        "source/private.mp4": b"private-source-video",
+    }
+    for rel, data in artifacts.items():
+        storage.save_bytes(f"{job_id}/{rel}", data)
+    timeline = {
+        "items": [
+            {"source_frame": "frames/ocr.jpg", "ocr": {"lines": [{"text": "Example"}]}, "vision": {"status": "not_sampled"}},
+            {"source_frame": "frames/opening_dense/vision.jpg", "ocr": {"lines": []}, "vision": {"status": "success"}},
+            {"source_frame": "frames/unobserved.jpg", "ocr": {"lines": []}, "vision": {"status": "not_sampled"}},
+            {"source_frame": "frames/ocr.jpg", "ocr": {"lines": []}, "vision": {"status": "success"}},
+            {"source_frame": "frames/../source/private.mp4", "ocr": {"lines": [{"text": "Attack"}]}},
+            {"source_frame": "source/private.mp4", "vision": {"status": "success"}},
+            {"source_frame": "frames/missing.jpg", "vision": {"status": "success"}},
+        ]
+    }
+    storage.save_bytes(f"{job_id}/analysis/timeline.json", json.dumps(timeline).encode())
+
+    resp = client.get(f"/api/jobs/{job_id}/download?asset=zip&visuals=storyboards")
+    assert resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+        names = archive.namelist()
+        assert set(names) == {
+            "storyboards/adaptive_storyboard_01.jpg",
+            "analysis/timeline.json",
+            "analysis/report.md",
+            "analysis/report.txt",
+            "metadata/frames.json",
+            "frames/ocr.jpg",
+            "frames/opening_dense/vision.jpg",
+        }
+        assert names.count("frames/ocr.jpg") == 1
+        assert archive.read("frames/ocr.jpg") == artifacts["frames/ocr.jpg"]
+        assert archive.read("frames/opening_dense/vision.jpg") == artifacts["frames/opening_dense/vision.jpg"]
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        None,
+        [None, "invalid"],
+        [{"source_frame": "frames/unobserved.jpg", "ocr": "invalid", "vision": []}],
+        [{"source_frame": "frames/opening_dense", "vision": {"status": "success"}}],
+    ],
+)
+def test_ai_dataset_storyboards_ignore_invalid_evidence_references(client, items):
+    import zipfile
+
+    from app.storage import get_storage
+
+    job_id = _completed_job_with_storyboards()
+    storage = get_storage()
+    storage.save_bytes(f"{job_id}/frames/unobserved.jpg", b"unobserved")
+    storage.save_bytes(f"{job_id}/frames/opening_dense/unobserved.jpg", b"unobserved")
+    storage.save_bytes(f"{job_id}/analysis/timeline.json", json.dumps({"items": items}).encode())
+
+    resp = client.get(f"/api/jobs/{job_id}/download?asset=zip&visuals=storyboards")
+    assert resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+        assert set(archive.namelist()) == {
+            "storyboards/adaptive_storyboard_01.jpg",
+            "analysis/timeline.json",
+        }
 
 
 def test_single_asset_downloads_exclude_duplicate_metadata(client):

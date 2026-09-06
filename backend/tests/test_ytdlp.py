@@ -238,6 +238,64 @@ def test_run_passes_impersonate_and_omits_cookies_when_asked(tmp_path):
     assert captured[captured.index("--impersonate") + 1] == "chrome"
 
 
+def test_proxy_timeout_keeps_diagnostics_without_credentials(monkeypatch):
+    import traceback
+
+    proxy = "http://dummy-user:dummy-timeout-secret@proxy.example:8080"
+    settings = get_settings()
+    monkeypatch.setattr(settings, "YTDLP_PROXY", proxy)
+    monkeypatch.setattr(settings, "COOKIES_FILE", "")
+
+    def timeout(cmd, **kwargs):
+        assert cmd[cmd.index("--proxy") + 1] == proxy
+        raise subprocess.TimeoutExpired(
+            cmd, kwargs["timeout"], stderr=f"ERROR: Connection stalled via {proxy}".encode()
+        )
+
+    with patch("app.utils.ytdlp.subprocess.run", side_effect=timeout):
+        with pytest.raises(YtDlpError) as failure:
+            _run(["--dump-single-json", "https://example.com/video"], timeout=30)
+
+    error = failure.value
+    assert error.code == "download_failed"
+    assert "timed out after 30s" in error.message
+    assert "Connection stalled" in error.stderr
+    assert "http://***@proxy.example:8080" in error.stderr
+    surfaced = json.dumps(error.to_detail()) + "".join(traceback.format_exception(error))
+    assert "dummy-user" not in surfaced
+    assert "dummy-timeout-secret" not in surfaced
+
+
+def test_proxy_failure_stderr_and_error_detail_are_redacted(monkeypatch):
+    proxy = "socks5://dummy-user:dummy-failure-secret@proxy.example:1080"
+    settings = get_settings()
+    monkeypatch.setattr(settings, "YTDLP_PROXY", proxy)
+    monkeypatch.setattr(settings, "COOKIES_FILE", "")
+    stderr = f"ERROR: Connection reset by peer using {proxy}".encode()
+
+    with patch("app.utils.ytdlp.subprocess.run", return_value=_completed([], 1, stderr=stderr)):
+        result = _run(["https://example.com/video"], timeout=30)
+    # Both callers that log CompletedProcess.stderr and callers that persist
+    # YtDlpError.to_detail must receive scrubbed diagnostics.
+    assert b"dummy-failure-secret" not in result.stderr
+    assert b"socks5://***@proxy.example:1080" in result.stderr
+    with patch("app.utils.ytdlp._run", return_value=_completed([], 1, stderr=stderr)), patch(
+        "app.utils.ytdlp.impersonation_available", return_value=False
+    ):
+        with pytest.raises(YtDlpError) as failure:
+            _run_with_extractor_retry(["https://example.com/video"], timeout=30, log=_noop_log)
+    assert failure.value.code == "tiktok_network_error"
+    assert "dummy-failure-secret" not in json.dumps(failure.value.to_detail())
+
+
+def test_proxy_redaction_handles_at_sign_inside_password():
+    from app.utils.ytdlp import redact_proxy
+
+    assert redact_proxy("http://dummy-user:first@second@proxy.example:8080") == (
+        "http://***@proxy.example:8080"
+    )
+
+
 # ------------------------------------------------------------ channel update
 
 
@@ -562,6 +620,27 @@ def test_cookie_report_describes_shape_and_age_but_never_contents(tmp_path):
     # The whole point: no values anywhere in the payload.
     assert secret not in json.dumps(report)
     assert "another-value" not in json.dumps(report)
+
+
+def test_cookie_report_does_not_call_another_sites_sessionid_a_tiktok_cookie(tmp_path):
+    from app.utils.ytdlp import cookie_file_report
+
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".instagram.com\tTRUE\t/\tTRUE\t1799999999\tsessionid\tinstagram-secret\n"
+    )
+    settings = get_settings()
+    original = settings.COOKIES_FILE
+    settings.COOKIES_FILE = str(cookies)
+    try:
+        report = cookie_file_report()
+    finally:
+        settings.COOKIES_FILE = original
+
+    assert report["has_tiktok_entries"] is False
+    assert report["tiktok_session_cookies_present"] == []
+    assert "instagram-secret" not in json.dumps(report)
 
 
 def test_cookie_report_flags_a_stale_export(tmp_path):

@@ -1,0 +1,37 @@
+{
+  "jobId": "574bae98-93ae-40b3-abdc-ef30dd34604a",
+  "elapsedSeconds": 5.225,
+  "completedAt": "2026-09-06T03:12:27.126647+00:00",
+  "mainFrames": 120,
+  "uniqueMainPTS": 120,
+  "firstPTS": 0.015,
+  "lastPTS": 1.998,
+  "actualMainFPS": 60,
+  "allEvidenceFrames": 128,
+  "sourceFPS": 60,
+  "transcriptCacheHit": true,
+  "mainRange": {
+    "start_seconds": 0,
+    "end_seconds": 2,
+    "timestamp_origin": "original_video",
+    "frame_budget": 150,
+    "actual_frame_count": 120,
+    "actual_average_fps": 60
+  },
+  "errors": [],
+  "reports": [
+    {
+      "format": "txt",
+      "bytes": 43577
+    },
+    {
+      "format": "md",
+      "bytes": 43704
+    },
+    {
+      "format": "json",
+      "bytes": 564930
+    }
+  ],
+  "latestPlanningVerified": true
+}

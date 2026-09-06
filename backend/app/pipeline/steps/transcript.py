@@ -32,7 +32,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.pipeline.base import PipelineStep
-from app.pipeline.context import PipelineContext
+from app.pipeline.context import JobCancelled, PipelineContext
 from app.pipeline.errors import PipelineFailedError
 from app.pipeline.steps.load_model import LoadWhisperModelStep
 from app.pipeline.steps.transcribe import TranscribeStep
@@ -269,6 +269,8 @@ class TranscriptSourceStep(PipelineStep):
                         continue
                     raw = sub_path.read_text(encoding="utf-8", errors="replace")
                     caption_language = self._language_from_filename(sub_path.name, video_id)
+            except JobCancelled:
+                raise
             except YtDlpError as exc:
                 ctx.warning(f"{track.capitalize()} caption fetch failed: {exc.message}")
                 continue
@@ -293,7 +295,7 @@ class TranscriptSourceStep(PipelineStep):
             ctx.shared["caption_plain_text"] = subtitles_to_text(raw)
             ctx.info(
                 f"Using the platform's {track} captions: {len(segments)} segments, "
-                "no audio download needed."
+                "Whisper decoding skipped."
             )
             return True
 

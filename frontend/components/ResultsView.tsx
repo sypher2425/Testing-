@@ -4,6 +4,8 @@ import { useState } from "react";
 import { aiDatasetUrl, cancelOrDeleteJob, downloadUrl } from "@/lib/api";
 import type { JobStatusResponse } from "@/lib/types";
 import FrameGallery from "./FrameGallery";
+import AnalysisPanel from "./AnalysisPanel";
+import ReanalysisPanel from "./ReanalysisPanel";
 import JobLogPanel from "./JobLogPanel";
 import ManifestSummary from "./ManifestSummary";
 import StoryboardPanel from "./StoryboardPanel";
@@ -14,6 +16,7 @@ import TranscriptPanel from "./TranscriptPanel";
 export default function ResultsView({ job }: { job: JobStatusResponse }) {
   const [deleting, setDeleting] = useState(false);
   const [visualMode, setVisualMode] = useState<"frames" | "storyboards">("frames");
+  const elapsedSeconds = job.started_at && job.completed_at ? Math.max(0, Math.round((new Date(job.completed_at).getTime() - new Date(job.started_at).getTime()) / 1000)) : null;
 
   async function handleDelete() {
     if (deleting) return;
@@ -39,6 +42,7 @@ export default function ResultsView({ job }: { job: JobStatusResponse }) {
               {job.frame_count} frames · {job.language ?? "no speech"} ·{" "}
               {job.video.duration_seconds?.toFixed(1)}s
             </p>
+            {elapsedSeconds !== null && Number.isFinite(elapsedSeconds) && <p className="mt-1 text-xs text-slate-400">Processed in {Math.floor(elapsedSeconds / 60)}m {elapsedSeconds % 60}s{typeof job.options.processing_profile === "string" ? ` · ${job.options.processing_profile} profile` : ""}</p>}
           </div>
           <div className="shrink-0">
             <StatusChip status={job.status} />
@@ -54,7 +58,7 @@ export default function ResultsView({ job }: { job: JobStatusResponse }) {
               className="min-h-9 rounded-md border-0 bg-surface px-2 text-xs text-slate-200"
               aria-label="Choose AI dataset visuals"
             >
-              <option value="frames">Every frame</option>
+              <option value="frames">All extracted frames</option>
               <option value="storyboards">Adaptive storyboards (smaller)</option>
             </select>
           </label>
@@ -72,10 +76,12 @@ export default function ResultsView({ job }: { job: JobStatusResponse }) {
           </button>
         </div>
         <p className="mt-2 text-[11px] text-slate-500">
-          Includes one timed transcript JSON, audio analysis, performance, comments, and your selected visuals. Frames and storyboards are never duplicated in the same ZIP.
+          Includes the timed transcript, available analyses, metadata, and your selected visuals. Overview sheets include full-resolution images supporting OCR and visual observations.
         </p>
       </div>
 
+      <ReanalysisPanel job={job} />
+      <AnalysisPanel jobId={job.job_id} />
       <PerformancePanel jobId={job.job_id} />
       <ManifestSummary jobId={job.job_id} />
       <StoryboardPanel jobId={job.job_id} />

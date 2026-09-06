@@ -11,6 +11,8 @@ The model is cached per worker process and reused across sequential jobs;
 the log line says explicitly whether it was loaded or reused.
 """
 import os
+import ctypes
+import threading
 import time
 
 from app.config import get_settings
@@ -20,16 +22,46 @@ from app.pipeline.errors import PipelineFailedError
 from app.utils.timeouts import HeartbeatTicker, StepTimeout, time_limit
 
 # Process-local cache: one model instance reused by every job this worker
-# child handles. Keyed by the settings that affect the weights themselves.
-_model_cache: dict[str, object] = {}
+# child handles. Store the creating PID as well as the model because Celery's
+# prefork pool copies Python globals into its children. Native CTranslate2
+# models cannot safely be reused after that fork.
+_model_cache: dict[str, tuple[int, object]] = {}
+_model_cache_lock = threading.Lock()
 
 
 def _cache_key(settings) -> str:
     return f"{settings.WHISPER_MODEL_SIZE}:{settings.WHISPER_DEVICE}:{settings.WHISPER_COMPUTE_TYPE}"
 
 
+def execution_config(settings=None) -> tuple[str, str]:
+    settings = settings or get_settings()
+    device = settings.WHISPER_DEVICE
+    if device == "auto":
+        try:
+            import ctranslate2
+            device = "cuda" if ctranslate2.get_cuda_device_count() else "cpu"
+            if device == "cuda":
+                ctypes.CDLL("cublas64_12.dll" if os.name == "nt" else "libcublas.so.12")
+                ctypes.CDLL("cudnn64_9.dll" if os.name == "nt" else "libcudnn.so.9")
+        except (ImportError, RuntimeError, OSError):
+            device = "cpu"
+    compute = settings.WHISPER_COMPUTE_TYPE
+    if device == "cpu" and compute in {"float16", "int8_float16", "bfloat16", "int8_bfloat16"}:
+        compute = "int8"
+    return device, compute
+
+
 def is_model_cached() -> bool:
-    return _cache_key(get_settings()) in _model_cache
+    key = _cache_key(get_settings())
+    with _model_cache_lock:
+        cached = _model_cache.get(key)
+        return cached is not None and cached[0] == os.getpid()
+
+
+def clear_model_cache() -> None:
+    """Drop references inherited from another process after Celery forks."""
+    with _model_cache_lock:
+        _model_cache.clear()
 
 
 def load_whisper_model(log=None):
@@ -38,38 +70,49 @@ def load_whisper_model(log=None):
     settings = get_settings()
     key = _cache_key(settings)
 
-    if key in _model_cache:
+    # Warm-up and the first real job can arrive together. Serialize the load so
+    # the worker never allocates two ~0.5-1GB models or observes a half-built
+    # cache entry.
+    with _model_cache_lock:
+        cached = _model_cache.get(key)
+        if cached is not None and cached[0] == os.getpid():
+            if log:
+                log("info", f"Whisper model '{settings.WHISPER_MODEL_SIZE}' reused from this worker's cache")
+            return cached[1]
+
+        # An entry with another PID was constructed before Celery forked. Do
+        # not call into that inherited native object; replace it in this child.
+        _model_cache.pop(key, None)
+
+        # huggingface_hub reads these at import/download time; setting them here
+        # means one place controls the cache location and socket timeout.
+        os.environ.setdefault("HF_HOME", settings.HF_HOME)
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", str(settings.HF_HUB_DOWNLOAD_TIMEOUT))
+
+        from faster_whisper import WhisperModel
+
         if log:
-            log("info", f"Whisper model '{settings.WHISPER_MODEL_SIZE}' reused from this worker's cache")
-        return _model_cache[key]
+            log(
+                "info",
+                f"Loading Whisper model '{settings.WHISPER_MODEL_SIZE}' "
+                f"(device={settings.WHISPER_DEVICE}, compute_type={settings.WHISPER_COMPUTE_TYPE}). "
+                f"First run downloads the weights to {settings.HF_HOME} — this can take several "
+                "minutes on a slow connection; later runs reuse the cache.",
+            )
 
-    # huggingface_hub reads these at import/download time; setting them here
-    # means one place controls the cache location and socket timeout.
-    os.environ.setdefault("HF_HOME", settings.HF_HOME)
-    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", str(settings.HF_HUB_DOWNLOAD_TIMEOUT))
-
-    from faster_whisper import WhisperModel
-
-    if log:
-        log(
-            "info",
-            f"Loading Whisper model '{settings.WHISPER_MODEL_SIZE}' "
-            f"(device={settings.WHISPER_DEVICE}, compute_type={settings.WHISPER_COMPUTE_TYPE}). "
-            f"First run downloads the weights to {settings.HF_HOME} — this can take several "
-            "minutes on a slow connection; later runs reuse the cache.",
+        device, compute = execution_config(settings)
+        started = time.monotonic()
+        model = WhisperModel(
+            settings.WHISPER_MODEL_SIZE,
+            device=device,
+            compute_type=compute,
+            download_root=settings.HF_HOME or None,
+            cpu_threads=settings.WHISPER_CPU_THREADS,
         )
-
-    started = time.monotonic()
-    model = WhisperModel(
-        settings.WHISPER_MODEL_SIZE,
-        device=settings.WHISPER_DEVICE,
-        compute_type=settings.WHISPER_COMPUTE_TYPE,
-        download_root=settings.HF_HOME or None,
-    )
-    _model_cache[key] = model
-    if log:
-        log("info", f"Whisper model ready in {time.monotonic() - started:.1f}s")
-    return model
+        _model_cache[key] = (os.getpid(), model)
+        if log:
+            log("info", f"Whisper model ready on {device}/{compute} in {time.monotonic() - started:.1f}s")
+        return model
 
 
 class LoadWhisperModelStep(PipelineStep):
@@ -84,6 +127,12 @@ class LoadWhisperModelStep(PipelineStep):
 
         if not video_meta.get("has_audio"):
             ctx.info("Video has no audio track; skipping model load.")
+            ctx.set_step_progress(self.name, 100)
+            return
+
+        from app.utils.transcript_cache import prepare_transcript
+        if prepare_transcript(ctx):
+            ctx.info("Transcript already available; model loading skipped.")
             ctx.set_step_progress(self.name, 100)
             return
 

@@ -31,10 +31,12 @@ from app.utils.timestamps import now_utc_iso
 
 class YtDlpError(Exception):
     def __init__(self, code: str, message: str, *, stderr: str = ""):
+        proxy = get_settings().YTDLP_PROXY
+        message = _redact_proxy_output(message, proxy)
         super().__init__(message)
         self.code = code  # "video_unavailable" | "extractor_outdated" | "download_failed"
         self.message = message
-        self.stderr = stderr
+        self.stderr = _redact_proxy_output(stderr, proxy)
 
     def to_detail(self) -> dict:
         return {"code": self.code, "stderr": self.stderr[-4000:] if self.stderr else ""}
@@ -66,10 +68,18 @@ def redact_proxy(value: str) -> str:
     so a password never leaves the process."""
     if not value:
         return ""
-    match = re.match(r"^(?P<scheme>\w+://)(?:[^@/]+@)?(?P<host>.+)$", value)
+    match = re.match(r"^(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<authority>.+)$", value)
     if not match:
         return "(configured)"
-    return f"{match.group('scheme')}***@{match.group('host')}" if "@" in value else value
+    # Split at the last @ so a password containing @ cannot become part of
+    # the reported host. The proxy is never useful with its userinfo attached.
+    authority = match.group("authority")
+    return f"{match.group('scheme')}***@{authority.rsplit('@', 1)[-1]}" if "@" in authority else value
+
+
+def _redact_proxy_output(value: str, proxy: str) -> str:
+    """Scrub an echoed configured proxy before diagnostics leave this module."""
+    return value.replace(proxy, redact_proxy(proxy)) if proxy else value
 
 
 def proxy_status() -> str:
@@ -137,11 +147,23 @@ def _run(
         cmd += ["--cookies", cookies_scratch_path]
     cmd += args
     try:
-        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        # Comment extraction also logs stderr directly, without YtDlpError.
+        # Sanitize here as well as at the exception boundary.
+        if settings.YTDLP_PROXY and result.stderr:
+            result.stderr = result.stderr.replace(
+                settings.YTDLP_PROXY.encode(), redact_proxy(settings.YTDLP_PROXY).encode()
+            )
+        return result
     except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired.__str__ includes the complete command and therefore
+        # --proxy credentials. Retain captured diagnostics, never that command.
+        stderr = exc.stderr or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
         raise YtDlpError(
-            "download_failed", f"yt-dlp timed out after {timeout}s", stderr=str(exc)
-        ) from exc
+            "download_failed", f"yt-dlp timed out after {timeout}s", stderr=stderr
+        ) from None
     except FileNotFoundError as exc:
         raise YtDlpError("download_failed", "yt-dlp is not installed", stderr=str(exc)) from exc
     finally:
@@ -412,8 +434,13 @@ def cookie_file_report() -> dict:
     netscape = text.lstrip().startswith("# Netscape HTTP Cookie File") or all(
         ln.count("\t") >= 6 for ln in lines[:5]
     ) if lines else False
-    has_tiktok = any("tiktok" in ln.split("\t", 1)[0].lower() for ln in lines)
-    names = {ln.split("\t")[5] for ln in lines if ln.count("\t") >= 6}
+    parsed = [ln.split("\t") for ln in lines if ln.count("\t") >= 6]
+    tiktok_rows = [parts for parts in parsed if "tiktok" in parts[0].lower()]
+    has_tiktok = bool(tiktok_rows)
+    # Names such as `sessionid` are shared by many sites. Only report them as
+    # TikTok session cookies when their Netscape-cookie domain is TikTok;
+    # otherwise an Instagram-only jar looks like valid TikTok authentication.
+    names = {parts[5] for parts in tiktok_rows}
     age_days = round((time.time() - stat.st_mtime) / 86400, 1)
 
     return {

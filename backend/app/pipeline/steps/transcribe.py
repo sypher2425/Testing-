@@ -10,7 +10,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.pipeline.base import PipelineStep
-from app.pipeline.context import PipelineContext
+from app.pipeline.context import JobCancelled, PipelineContext
 from app.pipeline.errors import PipelineFailedError
 from app.utils.ffmpeg import FFmpegError, extract_audio_wav
 from app.utils.timeouts import HeartbeatTicker, StepTimeout, time_limit
@@ -90,6 +90,18 @@ class TranscribeStep(PipelineStep):
         ctx.set_step_progress(self.name, 0)
         video_meta = ctx.shared["video"]
 
+        from app.utils.transcript_cache import prepare_transcript, write_cached_transcript
+        if prepare_transcript(ctx):
+            transcript = ctx.shared.get("prepared_transcript") or ctx.shared["caption_transcript"]
+            self._write_outputs(ctx, transcript)
+            ctx.shared["transcript"] = transcript
+            ctx.shared["language"] = transcript.get("language")
+            ctx.update_job({"language": transcript.get("language")})
+            if not transcript.get("cache_hit"):
+                write_cached_transcript(ctx, transcript)
+            ctx.set_step_progress(self.name, 100)
+            return
+
         if not video_meta.get("has_audio"):
             ctx.info("Video has no audio track; skipping transcription.")
             transcript = {
@@ -134,21 +146,44 @@ class TranscribeStep(PipelineStep):
                         f"Transcription exceeded WHISPER_TIMEOUT_SECONDS "
                         f"({settings.WHISPER_TIMEOUT_SECONDS}s) and was aborted.",
                     ):
-                        segments_iter, info = model.transcribe(
-                            audio_path, word_timestamps=True, vad_filter=True
-                        )
+                        profile = ctx.options.get("processing_profile", "balanced")
+                        word_timestamps = profile == "detailed"
+                        params = ctx.options.get("transcript") or {}
+                        kwargs = {"word_timestamps": word_timestamps, "vad_filter": True,
+                                  "beam_size": 1 if profile == "fast" else 5}
+                        if params.get("language"):
+                            kwargs["language"] = params["language"]
+                        # Use batching on GPU only; CPU models keep the conservative
+                        # memory footprint, and test doubles remain ordinary transcribers.
+                        from app.pipeline.steps.load_model import execution_config
+                        device, _ = execution_config(settings)
+                        if device == "cuda" and settings.WHISPER_BATCH_SIZE > 1:
+                            from faster_whisper import BatchedInferencePipeline
+                            engine = BatchedInferencePipeline(model=model)
+                            segments_iter, info = engine.transcribe(audio_path, batch_size=settings.WHISPER_BATCH_SIZE, **kwargs)
+                        else:
+                            segments_iter, info = model.transcribe(audio_path, **kwargs)
                         segments: list[dict] = []
                         # faster-whisper yields lazily: the real work happens as
                         # we iterate, so this is where progress actually moves.
                         for seg in segments_iter:
                             ctx.check_cancel()
-                            segments.append(
-                                {
+                            entry = {
                                     "start": round(seg.start, 3),
                                     "end": round(seg.end, 3),
                                     "text": seg.text.strip(),
                                 }
-                            )
+                            for name in ("avg_logprob", "no_speech_prob"):
+                                value = getattr(seg, name, None)
+                                if isinstance(value, (float, int)):
+                                    entry[name] = float(value)
+                            if word_timestamps:
+                                entry["words"] = [
+                                    {"start": round(w.start, 3), "end": round(w.end, 3),
+                                     "word": w.word, "probability": w.probability}
+                                    for w in (getattr(seg, "words", None) or [])
+                                ]
+                            segments.append(entry)
                             if duration > 0:
                                 fraction = min(max(seg.end / duration, 0.0), 1.0)
                                 ctx.set_step_progress(
@@ -159,6 +194,8 @@ class TranscribeStep(PipelineStep):
                             else:
                                 ctx.heartbeat()
                         language = info.language
+            except JobCancelled:
+                raise
             except StepTimeout as exc:
                 raise PipelineFailedError("transcription_timeout", str(exc)) from exc
             except Exception as exc:  # noqa: BLE001
@@ -182,9 +219,14 @@ class TranscribeStep(PipelineStep):
             "skipped": False,
             "skipped_reason": None,
             "segments": segments,
+            "source": "whisper",
+            "model": settings.WHISPER_MODEL_SIZE,
+            "word_timestamps": word_timestamps,
+            "cache_hit": False,
         }
         self._write_outputs(ctx, transcript)
         ctx.shared["transcript"] = transcript
+        write_cached_transcript(ctx, transcript)
         ctx.shared["language"] = language
         ctx.update_job({"language": language})
         ctx.info(f"Transcription complete: language={language}, {len(segments)} segments")

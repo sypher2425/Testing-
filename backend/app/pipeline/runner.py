@@ -65,6 +65,7 @@ def _build_pipeline(job_type: str = "video") -> list:
     from app.pipeline.steps.probe import ProbeStep
     from app.pipeline.steps.storyboards import StoryboardStep
     from app.pipeline.steps.transcribe import TranscribeStep
+    from app.pipeline.steps.analyze_visuals import AnalyzeVisualsStep
 
     return [
         FetchSourceStep(),
@@ -72,6 +73,7 @@ def _build_pipeline(job_type: str = "video") -> list:
         LoadWhisperModelStep(),
         TranscribeStep(),
         ExtractFramesStep(),
+        AnalyzeVisualsStep(),
         StoryboardStep(),
         GenerateMetadataStep(),
         ZipOutputStep(),
@@ -107,9 +109,18 @@ def run_pipeline(job_id: str) -> None:
             session.add(JobLog(job_id=job_id, level=level, message=message))
             session.commit()
 
+    last_progress: dict[str, tuple[int, float]] = {}
+
     def set_step_progress(step_name: str, pct: int) -> None:
         # Progress is bookkeeping: never let a failed write destroy the work
         # it is only describing.
+        pct = max(0, min(100, pct))
+        previous = last_progress.get(step_name)
+        now = time.monotonic()
+        if previous and previous[0] == pct and now - previous[1] < 5:
+            return
+        if previous and pct not in (0, 100) and now - previous[1] < 0.5:
+            return
         try:
             with db_session() as session:
                 job = session.get(Job, job_id)
@@ -122,6 +133,7 @@ def run_pipeline(job_id: str) -> None:
                 job.overall_progress = _overall_progress(progress, job.job_type)
                 job.last_heartbeat = datetime.now(timezone.utc)
                 session.commit()
+                last_progress[step_name] = (pct, now)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not record progress for job %s: %s", job_id, exc)
 
@@ -211,6 +223,11 @@ def run_pipeline(job_id: str) -> None:
     # processing.started_at carries an offset like every other stamp.
     ctx.shared["started_at"] = ensure_aware_iso(job_started_at)[0]
 
+    if job_options.get("reuse_job_id") and job_type == "video":
+        from app.pipeline.steps.reuse_dataset import ReuseDatasetStep
+        pipeline = [ReuseDatasetStep()] + [step for step in pipeline if step.name in {
+            "analyzing_visuals", "generating_storyboards", "generating_metadata", "zipping"}]
+
     persist_log("info", f"Starting pipeline for job {job_id} (mode={job_mode})")
 
     try:
@@ -233,6 +250,13 @@ def run_pipeline(job_id: str) -> None:
                 "error": None,
             }
             try:
+                if step.name == "analyzing_visuals" and ctx.options.get("vision_enabled"):
+                    # Keep the 8GB card available for the local vision model.
+                    import gc
+                    from app.pipeline.steps.load_model import clear_model_cache
+                    ctx.shared.pop("whisper_model", None)
+                    clear_model_cache()
+                    gc.collect()
                 step.run(ctx)
             except Exception as exc:
                 stage_report["status"] = "extraction_failed"

@@ -123,7 +123,8 @@ class ZipOutputStep(PipelineStep):
                         ctx.check_cancel()
                         if arcname in seen_arcnames:
                             continue
-                        zf.write(full, arcname)
+                        compressed_media = arcname.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".webm", ".mkv", ".zip"))
+                        zf.write(full, arcname, compress_type=zipfile.ZIP_STORED if compressed_media else zipfile.ZIP_DEFLATED)
                         seen_arcnames.add(arcname)
                         ctx.set_step_progress(self.name, round(100 * (i + 1) / total))
         except OSError as exc:

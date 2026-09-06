@@ -23,6 +23,7 @@ const STAGE_LABELS: Record<string, string> = {
   loading_model: "Model loading",
   transcribing: "Transcription",
   extracting_frames: "Frame extraction",
+  analyzing_visuals: "Visual analysis",
   generating_storyboards: "Storyboard generation",
   generating_metadata: "Metadata generation",
   zipping: "Dataset packaging",

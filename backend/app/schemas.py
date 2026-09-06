@@ -2,7 +2,7 @@
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ExtractionMode(str, Enum):
@@ -17,10 +17,31 @@ class FrameFormat(str, Enum):
     png = "png"
 
 
+class FrameBurst(BaseModel):
+    start_seconds: float = Field(ge=0, allow_inf_nan=False)
+    end_seconds: float = Field(gt=0, allow_inf_nan=False)
+    fps: float = Field(default=5, ge=1, le=60, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def ordered_range(self):
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("Burst end must be after its start")
+        return self
+
+
 class CreateJobOptions(BaseModel):
     mode: ExtractionMode = ExtractionMode.adaptive
-    interval_ms: int = Field(default=1000, ge=100)
-    target_frames: int = Field(default=80, ge=10, le=500)
+    interval_ms: int = Field(default=1000, ge=17)
+    target_frames: int = Field(default=300, ge=30, le=2000)
+    frame_budget: int = Field(default=2000, ge=30, le=20000)
+    processing_profile: Literal["fast", "balanced", "detailed"] = "balanced"
+    source_preference: Literal["captions_first", "whisper_only"] = "captions_first"
+    range_start_seconds: float = Field(default=0, ge=0, allow_inf_nan=False)
+    range_end_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    frame_bursts: list[FrameBurst] = Field(default_factory=list, max_length=8)
+    analysis_objective: str = Field(default="", max_length=2000)
+    ocr_enabled: bool = True
+    vision_enabled: bool = False
     frame_format: FrameFormat = FrameFormat.jpeg
     frame_max_dim: int = Field(default=1280, ge=64, le=7680)
     # Dataset v2: dense sampling of the opening seconds (None = env default)
@@ -36,13 +57,26 @@ class CreateJobOptions(BaseModel):
     @field_validator("interval_ms")
     @classmethod
     def validate_interval(cls, v: int) -> int:
-        if v < 100:
-            raise ValueError("interval_ms must be >= 100")
+        if v < 17:
+            raise ValueError("interval_ms must be >= 17")
         return v
+
+    @model_validator(mode="after")
+    def ordered_range(self):
+        if self.range_end_seconds is not None and self.range_end_seconds <= self.range_start_seconds:
+            raise ValueError("Frame range end must be after its start")
+        return self
 
 
 class CreateJobResponse(BaseModel):
     job_id: str
+
+
+class ReanalyzeRequest(BaseModel):
+    processing_profile: Literal["fast", "balanced", "detailed"] = "balanced"
+    analysis_objective: str = Field(default="", max_length=2000)
+    ocr_enabled: bool = True
+    vision_enabled: bool = False
 
 
 class CreateResearchJobRequest(BaseModel):
@@ -120,11 +154,21 @@ class JobListResponse(BaseModel):
     page_size: int
 
 
+class TranscriptWord(BaseModel):
+    start: float
+    end: float
+    word: str
+    probability: float | None = None
+
+
 class TranscriptSegment(BaseModel):
     start: float
     end: float
     text: str
     speaker: str | None = None
+    words: list[TranscriptWord] | None = None
+    avg_logprob: float | None = None
+    no_speech_prob: float | None = None
 
 
 class TranscriptJSON(BaseModel):
@@ -133,6 +177,10 @@ class TranscriptJSON(BaseModel):
     skipped: bool = False
     skipped_reason: str | None = None
     segments: list[TranscriptSegment]
+    source: str | None = None
+    model: str | None = None
+    word_timestamps: bool | None = None
+    cache_hit: bool = False
 
 
 class FrameMeta(BaseModel):
@@ -147,6 +195,9 @@ class FrameMeta(BaseModel):
     event_id: str | None = None
     transcript_segment_index: int | None = None
     phash: str | None = None
+    requested_timestamp: float | None = None
+    source_frame_index: int | None = None
+    timestamp_source: str | None = None
 
 
 class FrameListResponse(BaseModel):

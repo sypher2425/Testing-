@@ -415,10 +415,21 @@ class StoryboardStep(PipelineStep):
             nearest = min(
                 chronological, key=lambda f: abs(float(f.get("timestamp") or 0.0) - midpoint)
             )
-            tile = self._tile(ctx, nearest, segments, subtitle=f"SEG {i:02d}")
-            # Force the caption/segment to THIS line even if the nearest frame
-            # happens to fall in a neighbouring segment's span.
+            timestamp = float(nearest.get("timestamp") or 0.0)
+            within_segment = float(start) <= timestamp <= float(end)
+            distance = max(float(start) - timestamp, timestamp - float(end), 0.0)
+            label = f"SEG {i:02d}" if within_segment else f"SEG {i:02d} | NEARBY +{distance:.1f}s"
+            tile = self._tile(ctx, nearest, segments, subtitle=label)
+            # Retain the target line, but explicitly label an image outside
+            # that line's interval instead of implying simultaneous evidence.
             tile.caption = seg.get("text")
+            if not within_segment:
+                tile.caption = f"[Nearby frame, {distance:.1f}s outside speech] {tile.caption or ''}"
+            tile.extra["transcript_alignment"] = {
+                "within_segment": within_segment,
+                "distance_to_segment_seconds": round(distance, 3),
+                "distance_to_midpoint_seconds": round(abs(timestamp - midpoint), 3),
+            }
             tile.extra["transcript_segment"] = {
                 "index": i,
                 "start": start,

@@ -3,12 +3,15 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { bulkTranscriptsUrl, getTranscript, listJobs, transcriptUrl } from "@/lib/api";
+import { MAX_BATCH_ITEMS } from "@/lib/batch";
+import { downloadMergedTranscripts } from "@/lib/transcriptExport";
 import type { JobStatusResponse, TranscriptJSON, TranscriptSegment } from "@/lib/types";
 
 const TranscriptVisualEditor = dynamic(() => import("./TranscriptVisualEditor"), { ssr: false });
 
 const INITIAL_SEGMENT_LIMIT = 200;
 const REFRESH_INTERVAL_MS = 10_000;
+type BulkExportMode = "merged-txt" | "merged-json" | "zip-txt" | "zip-json" | "zip-srt";
 
 function formatTime(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
@@ -65,13 +68,22 @@ export default function TranscriptLibrary({ refreshKey = 0 }: { refreshKey?: num
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
-  const [bulkFormat, setBulkFormat] = useState<"txt" | "json" | "srt">("txt");
-  const [bulkMerged, setBulkMerged] = useState(false);
+  const [bulkSelecting, setBulkSelecting] = useState(false);
+  const [bulkExportMode, setBulkExportMode] = useState<BulkExportMode>("merged-txt");
+  const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkExporting, setBulkExporting] = useState(false);
+  const [bulkFeedback, setBulkFeedback] = useState<{
+    kind: "info" | "success" | "error";
+    message: string;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    let refreshInFlight = false;
 
     async function refresh() {
+      if (refreshInFlight) return;
+      refreshInFlight = true;
       try {
         const response = await listJobs(1, 100);
         if (cancelled) return;
@@ -80,6 +92,11 @@ export default function TranscriptLibrary({ refreshKey = 0 }: { refreshKey?: num
         );
         const completed = transcriptJobs.filter((job) => job.status === "completed");
         setJobs(completed);
+        const completedIds = new Set(completed.map((job) => job.job_id));
+        setBulkSelectedIds((current) => {
+          const next = new Set(Array.from(current).filter((jobId) => completedIds.has(jobId)));
+          return next.size === current.size ? current : next;
+        });
         setProcessingCount(transcriptJobs.length - completed.length);
         setSelectedId((current) =>
           current && completed.some((job) => job.job_id === current)
@@ -90,6 +107,7 @@ export default function TranscriptLibrary({ refreshKey = 0 }: { refreshKey?: num
       } catch (caught) {
         if (!cancelled) setJobsError(caught instanceof Error ? caught.message : "Could not load transcript library.");
       } finally {
+        refreshInFlight = false;
         if (!cancelled) setLoadingJobs(false);
       }
     }
@@ -137,6 +155,12 @@ export default function TranscriptLibrary({ refreshKey = 0 }: { refreshKey?: num
       ? jobs.filter((job) => job.original_filename.toLocaleLowerCase().includes(query))
       : jobs;
   }, [jobs, libraryQuery]);
+  const orderedSelectedJobs = useMemo(
+    () => jobs.filter((job) => bulkSelectedIds.has(job.job_id)),
+    [jobs, bulkSelectedIds]
+  );
+  const canSelectMoreMatching = bulkSelectedIds.size < MAX_BATCH_ITEMS
+    && filteredJobs.some((job) => !bulkSelectedIds.has(job.job_id));
 
   const matchingSegments = useMemo(() => {
     const segments = transcript?.segments ?? [];
@@ -163,6 +187,80 @@ export default function TranscriptLibrary({ refreshKey = 0 }: { refreshKey?: num
     }
   }
 
+  function toggleBulkSelection(jobId: string) {
+    const alreadySelected = bulkSelectedIds.has(jobId);
+    if (!alreadySelected && bulkSelectedIds.size >= MAX_BATCH_ITEMS) {
+      setBulkFeedback({
+        kind: "info",
+        message: `You can download up to ${MAX_BATCH_ITEMS} transcripts at a time.`,
+      });
+      return;
+    }
+
+    setBulkSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(jobId)) next.delete(jobId);
+      else next.add(jobId);
+      return next;
+    });
+    setBulkFeedback(null);
+  }
+
+  function selectAllMatching() {
+    const candidates = filteredJobs.filter((job) => !bulkSelectedIds.has(job.job_id));
+    const availableSlots = Math.max(0, MAX_BATCH_ITEMS - bulkSelectedIds.size);
+    const additions = candidates.slice(0, availableSlots);
+    setBulkSelectedIds((current) => {
+      const next = new Set(current);
+      additions.forEach((job) => next.add(job.job_id));
+      return next;
+    });
+    setBulkFeedback(
+      candidates.length > availableSlots
+        ? { kind: "info", message: `Selected the first ${MAX_BATCH_ITEMS} transcripts. That is the selection limit.` }
+        : null
+    );
+  }
+
+  function clearBulkSelection() {
+    setBulkSelectedIds(new Set());
+    setBulkFeedback(null);
+  }
+
+  async function exportSelectedTranscripts() {
+    if (bulkExporting || !orderedSelectedJobs.length) return;
+
+    setBulkExporting(true);
+    setBulkFeedback({
+      kind: "info",
+      message: `Preparing ${orderedSelectedJobs.length} selected transcript${orderedSelectedJobs.length === 1 ? "" : "s"}…`,
+    });
+    try {
+      const result = await downloadMergedTranscripts(
+        orderedSelectedJobs.map((job, order) => ({
+          jobId: job.job_id,
+          title: job.original_filename,
+          order,
+        })),
+        []
+      );
+      const skipped = result.skippedCount > 0
+        ? ` ${result.skippedCount} unavailable transcript${result.skippedCount === 1 ? " was" : "s were"} listed as skipped.`
+        : "";
+      setBulkFeedback({
+        kind: "success",
+        message: `Downloaded ${result.includedCount} transcript${result.includedCount === 1 ? "" : "s"} as ${result.filename}.${skipped}`,
+      });
+    } catch (caught) {
+      setBulkFeedback({
+        kind: "error",
+        message: caught instanceof Error ? caught.message : "Could not prepare the merged transcript download.",
+      });
+    } finally {
+      setBulkExporting(false);
+    }
+  }
+
   return (
     <>
     <div className="transcript-library">
@@ -172,7 +270,19 @@ export default function TranscriptLibrary({ refreshKey = 0 }: { refreshKey?: num
             <span className="reader-overline">Your library</span>
             <strong>{jobs.length} ready</strong>
           </div>
-          {processingCount > 0 && <span className="processing-badge">{processingCount} processing</span>}
+          <div className="transcript-index-header-actions">
+            {processingCount > 0 && <span className="processing-badge">{processingCount} processing</span>}
+            {jobs.length > 0 && (
+              <button
+                type="button"
+                className="transcript-select-mode-button"
+                aria-pressed={bulkSelecting}
+                onClick={() => setBulkSelecting((current) => !current)}
+              >
+                {bulkSelecting ? "Done" : bulkSelectedIds.size ? `Select (${bulkSelectedIds.size})` : "Select"}
+              </button>
+            )}
+          </div>
         </div>
         <label className="transcript-search-shell">
           <span aria-hidden="true">⌕</span>
@@ -185,58 +295,72 @@ export default function TranscriptLibrary({ refreshKey = 0 }: { refreshKey?: num
           />
         </label>
 
-        {filteredJobs.length > 0 && (
-          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-surface-border bg-surface px-3 py-2 text-xs text-slate-400">
-            <select
-              value={bulkFormat}
-              onChange={(event) => {
-                const next = event.target.value as "txt" | "json" | "srt";
-                setBulkFormat(next);
-                // Merged SRT is refused server-side (timelines collide), so
-                // the toggle drops rather than sending a doomed request.
-                if (next === "srt") setBulkMerged(false);
-              }}
-              aria-label="Bulk download format"
-              className="rounded-md border border-surface-border bg-surface px-2 py-1 text-slate-200"
-            >
-              <option value="txt">.txt</option>
-              <option value="srt">.srt</option>
-              <option value="json">.json</option>
-            </select>
-            <label
-              className={`flex items-center gap-1.5 ${bulkFormat === "srt" ? "opacity-40" : ""}`}
-              title={
-                bulkFormat === "srt"
-                  ? "SRT can't be combined — each subtitle timeline starts at 00:00"
-                  : "One combined file instead of a ZIP of separate files"
-              }
-            >
-              <input
-                type="checkbox"
-                checked={bulkMerged}
-                disabled={bulkFormat === "srt"}
-                onChange={(event) => setBulkMerged(event.target.checked)}
-              />
-              one file
+        {bulkSelecting && (
+          <section className="transcript-bulk-controls" aria-label="Bulk transcript download">
+            <div className="transcript-bulk-summary">
+              <strong id="transcript-selection-status" aria-live="polite">
+                {bulkSelectedIds.size} selected
+              </strong>
+              <span>Maximum {MAX_BATCH_ITEMS}</span>
+            </div>
+            <div className="transcript-bulk-actions">
+              <button type="button" onClick={selectAllMatching} disabled={!canSelectMoreMatching}>
+                Select all matching
+              </button>
+              <button type="button" onClick={clearBulkSelection} disabled={!bulkSelectedIds.size}>
+                Clear
+              </button>
+            </div>
+            <label className="grid gap-1 text-xs text-slate-400">
+              Export format
+              <select
+                value={bulkExportMode}
+                disabled={bulkExporting}
+                onChange={(event) => {
+                  setBulkExportMode(event.target.value as BulkExportMode);
+                  setBulkFeedback(null);
+                }}
+                aria-label="Bulk download format"
+                className="w-full rounded-md border border-surface-border bg-surface px-2 py-2 text-slate-200"
+              >
+                <option value="merged-txt">One merged .txt file</option>
+                <option value="merged-json">One merged .json file</option>
+                <option value="zip-txt">Separate .txt files in a ZIP</option>
+                <option value="zip-json">Separate .json files in a ZIP</option>
+                <option value="zip-srt">Separate .srt files in a ZIP</option>
+              </select>
             </label>
-            <a
-              className="ml-auto rounded-md bg-indigo-500/90 px-2.5 py-1 font-medium text-white transition-colors hover:bg-indigo-500"
-              href={bulkTranscriptsUrl(
-                filteredJobs.map((job) => job.job_id),
-                bulkFormat,
-                bulkMerged
-              )}
-              download
-              title={
-                libraryQuery.trim()
-                  ? "Downloads only the transcripts matching your search"
-                  : "Downloads every completed transcript in your library"
-              }
-            >
-              Download {filteredJobs.length === jobs.length ? "all" : filteredJobs.length}
-              {bulkMerged ? " as one file" : ""}
-            </a>
-          </div>
+            {bulkExportMode === "merged-txt" || !bulkSelectedIds.size ? (
+              <button
+                type="button"
+                className="transcript-bulk-download"
+                disabled={!bulkSelectedIds.size || bulkExporting}
+                onClick={exportSelectedTranscripts}
+              >
+                {bulkExporting ? "Preparing download…" : bulkExportMode === "merged-txt" ? "Download merged .txt" : "Download selected"}
+              </button>
+            ) : (
+              <a
+                className="transcript-bulk-download text-center"
+                href={bulkTranscriptsUrl(
+                  orderedSelectedJobs.map((job) => job.job_id),
+                  bulkExportMode === "merged-json" || bulkExportMode === "zip-json" ? "json" : bulkExportMode === "zip-srt" ? "srt" : "txt",
+                  bulkExportMode === "merged-json"
+                )}
+                download
+              >
+                {bulkExportMode === "merged-json" ? "Download merged .json" : "Download selected as ZIP"}
+              </a>
+            )}
+            {bulkFeedback && (
+              <p
+                className={`transcript-bulk-feedback transcript-bulk-feedback-${bulkFeedback.kind}`}
+                role={bulkFeedback.kind === "error" ? "alert" : "status"}
+              >
+                {bulkFeedback.message}
+              </p>
+            )}
+          </section>
         )}
 
         <div className="transcript-job-list">
@@ -256,19 +380,41 @@ export default function TranscriptLibrary({ refreshKey = 0 }: { refreshKey?: num
           {!loadingJobs && jobs.length > 0 && !filteredJobs.length && (
             <p className="reader-empty">No transcript names match your search.</p>
           )}
-          {filteredJobs.map((job) => (
-            <button
-              key={job.job_id}
-              type="button"
-              onClick={() => setSelectedId(job.job_id)}
-              className={`transcript-job ${selectedId === job.job_id ? "transcript-job-active" : ""}`}
-            >
-              <span className="transcript-job-type">{jobLabel(job)}</span>
-              <strong title={job.original_filename}>{job.original_filename}</strong>
-              <small>{timeAgo(job.completed_at ?? job.updated_at)}</small>
-              <span className="transcript-job-arrow" aria-hidden="true">→</span>
-            </button>
-          ))}
+          {filteredJobs.map((job) => {
+            const selectedForExport = bulkSelectedIds.has(job.job_id);
+            const selectionAtLimit = bulkSelectedIds.size >= MAX_BATCH_ITEMS && !selectedForExport;
+            return (
+              <div
+                key={job.job_id}
+                className={`transcript-job ${selectedId === job.job_id ? "transcript-job-active" : ""} ${selectedForExport ? "transcript-job-export-selected" : ""}`}
+              >
+                {bulkSelecting && (
+                  <label className="transcript-job-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={selectedForExport}
+                      disabled={selectionAtLimit}
+                      aria-label={`Select ${job.original_filename} for transcript download`}
+                      aria-describedby="transcript-selection-status"
+                      onChange={() => toggleBulkSelection(job.job_id)}
+                    />
+                  </label>
+                )}
+                <button
+                  type="button"
+                  className="transcript-job-open"
+                  onClick={() => setSelectedId(job.job_id)}
+                  aria-label={`Open ${job.original_filename} in the transcript reader`}
+                  aria-current={selectedId === job.job_id ? "true" : undefined}
+                >
+                  <span className="transcript-job-type">{jobLabel(job)}</span>
+                  <strong title={job.original_filename}>{job.original_filename}</strong>
+                  <small>{timeAgo(job.completed_at ?? job.updated_at)}</small>
+                  <span className="transcript-job-arrow" aria-hidden="true">→</span>
+                </button>
+              </div>
+            );
+          })}
         </div>
       </aside>
 

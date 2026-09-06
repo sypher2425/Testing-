@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from typing import Callable
 
 
 class FFmpegError(Exception):
@@ -104,7 +105,11 @@ def ffprobe(path: str, timeout: int = 60, *, require_video: bool = True) -> Prob
         )
 
     primary = video_stream or audio_stream
-    duration = float(data.get("format", {}).get("duration") or primary.get("duration") or 0.0)
+    # Prefer the selected stream's duration. Container duration can include a
+    # nonzero timestamp offset (e.g. a 2s clip beginning at PTS=5 reports 7s),
+    # while our public timeline and decoded timestamps begin at zero.
+    format_info = data.get("format", {})
+    duration = float(primary.get("duration") or format_info.get("duration") or 0.0)
     fps = None
     rate = (video_stream or {}).get("avg_frame_rate") or (video_stream or {}).get("r_frame_rate")
     if rate and rate != "0/0":
@@ -135,39 +140,45 @@ def extract_frame_at(
     fmt: str = "jpeg",
     timeout: int = 60,
     accurate: bool = False,
-) -> None:
+    check_cancel: Callable[[], None] | None = None,
+    heartbeat: Callable[[], None] | None = None,
+    hwaccel: str = "auto",
+    source_codec: str | None = None,
+    decode_stats: dict | None = None,
+) -> float | None:
     """Extract a single frame at timestamp_seconds, optionally downscaled to max_dim
     on the long edge, preserving aspect ratio.
 
-    By default uses fast (keyframe-based) seeking with -ss before -i. Pass
-    accurate=True to instead seek after -i: slower (decodes from the start),
-    but frame-accurate — a useful fallback when fast seeking lands on a
-    timestamp ffmpeg can't produce a frame for (e.g. right at EOF or in a
-    file with sparse keyframes)."""
-    vf_parts = []
+    Returns the decoded frame's presentation timestamp on the original
+    timeline. Input seeking already decodes forward from the preceding
+    keyframe. ``accurate`` is the slower decode-from-start fallback.
+    """
+    from pathlib import Path
+    from app.utils.frame_decode import TimestampCollector, run_decode_process
+
+    vf_parts = [f"trim=start={max(timestamp_seconds, 0.0):.9f}"]
     if max_dim:
         vf_parts.append(
             f"scale='if(gt(iw,ih),min(iw,{max_dim}),-2)':'if(gt(iw,ih),-2,min(ih,{max_dim}))'"
         )
-    timestamp_arg = f"{max(timestamp_seconds, 0.0):.3f}"
+    timestamp_arg = f"{max(timestamp_seconds, 0.0):.9f}"
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-copyts", "-start_at_zero"]
     if accurate:
-        cmd = ["ffmpeg", "-y", "-i", source_path, "-ss", timestamp_arg]
+        cmd += ["-i", source_path]
     else:
-        cmd = ["ffmpeg", "-y", "-ss", timestamp_arg, "-i", source_path]
-    if vf_parts:
-        cmd += ["-vf", ",".join(vf_parts)]
-    cmd += ["-frames:v", "1"]
+        cmd += ["-ss", timestamp_arg, "-i", source_path]
+    vf_parts.append("showinfo")
+    cmd += ["-map", "0:v:0", "-an", "-sn", "-vf", ",".join(vf_parts), "-fps_mode", "vfr", "-frames:v", "1", "-threads", "2"]
     if fmt == "jpeg":
         cmd += ["-q:v", str(_jpeg_quality_to_ffmpeg_q(quality))]
     cmd += [output_path]
-    proc = _run(cmd, timeout)
-    if proc.returncode != 0:
-        raise FFmpegError(
-            f"Failed to extract frame at {timestamp_seconds:.3f}s",
-            cmd=cmd,
-            returncode=proc.returncode,
-            stderr=proc.stderr.decode(errors="replace"),
-        )
+    collect = TimestampCollector(1)
+    stderr = run_decode_process(
+        cmd, source_path=source_path, hwaccel=hwaccel, source_codec=source_codec,
+        collect=collect, clear_outputs=lambda: Path(output_path).unlink(missing_ok=True),
+        timeout=timeout, check_cancel=check_cancel, heartbeat=heartbeat, decode_stats=decode_stats,
+    )
+    timestamps = collect.timestamps
     # ffmpeg can exit 0 while writing nothing if the seek timestamp lands at
     # or past the last decodable frame — verify a real file actually landed.
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
@@ -175,9 +186,12 @@ def extract_frame_at(
             f"ffmpeg exited successfully but produced no frame at {timestamp_seconds:.3f}s "
             "(likely sought past the last decodable frame)",
             cmd=cmd,
-            returncode=proc.returncode,
-            stderr=proc.stderr.decode(errors="replace"),
+            returncode=0,
+            stderr=stderr,
         )
+    if not timestamps:
+        raise FFmpegError("Extracted frame has no source timestamp", cmd=cmd, returncode=0, stderr=stderr)
+    return timestamps[0]
 
 
 def _jpeg_quality_to_ffmpeg_q(quality_0_100: int) -> int:

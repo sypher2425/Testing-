@@ -7,6 +7,13 @@
 
 export type ExtractionMode = "adaptive" | "interval" | "per_second" | "every_frame";
 export type FrameFormat = "jpeg" | "png";
+export type ProcessingProfile = "fast" | "balanced" | "detailed";
+
+export interface FrameBurst {
+  start_seconds: number;
+  end_seconds: number;
+  fps: number;
+}
 
 export interface CreateJobOptions {
   mode: ExtractionMode;
@@ -14,6 +21,15 @@ export interface CreateJobOptions {
   target_frames: number;
   frame_format: FrameFormat;
   frame_max_dim: number;
+  processing_profile?: ProcessingProfile;
+  source_preference?: "captions_first" | "whisper_only";
+  frame_budget?: number;
+  range_start_seconds?: number;
+  range_end_seconds?: number | null;
+  frame_bursts?: FrameBurst[];
+  analysis_objective?: string;
+  ocr_enabled?: boolean;
+  vision_enabled?: boolean;
   // Storyboard sheet generation (all optional; server defaults apply).
   storyboard_enabled?: boolean;
   storyboard_columns?: number;
@@ -92,6 +108,73 @@ export interface CreateJobResponse {
   job_id: string;
 }
 
+export interface RuntimeCapabilities {
+  max_frames: number;
+  min_interval_ms: number;
+  default_target_frames: number;
+  gpu: { available: boolean; device: string | null };
+  transcription: { model: string; device: string; batch_size: number };
+  analysis: { ocr_available: boolean; vision_available: boolean; vision_model: string | null };
+}
+
+export interface AnalysisEngineStatus {
+  status: string;
+  enabled: boolean;
+  engine?: string;
+  model?: string;
+  selected_frames: number;
+  processed_frames: number;
+  cache_hits: number;
+  text_lines?: number;
+  reason?: string;
+}
+
+export interface AnalysisTimelineItem {
+  id: string;
+  timestamp_seconds: number;
+  source_frame: string;
+  scene_id?: number | null;
+  transcript_segment_indices: number[];
+  ocr: {
+    status: string;
+    lines: { text: string; confidence: number; box?: number[][] }[];
+    cached?: boolean;
+  };
+  vision: {
+    status: string;
+    summary?: string;
+    observations?: string[];
+    uncertainty?: string[];
+    visible_text?: string[];
+    cached?: boolean;
+  };
+}
+
+export interface AnalysisTimeline {
+  schema_version: string;
+  status: "success" | "partial" | "skipped";
+  objective: string;
+  processing_profile: string;
+  generated_at: string;
+  coverage: {
+    source_duration_seconds: number | null;
+    range_start_seconds: number;
+    range_end_seconds: number | null;
+    extracted_frames: number;
+    ocr_selected_frames: number;
+    ocr_processed_frames: number;
+    vision_selected_frames: number;
+    vision_processed_frames: number;
+    largest_visual_gap_seconds: number | null;
+    limitations: string[];
+  };
+  transcript: TranscriptJSON;
+  ocr: AnalysisEngineStatus;
+  vision: AnalysisEngineStatus;
+  items: AnalysisTimelineItem[];
+  warnings: string[];
+}
+
 export interface VideoProperties {
   duration_seconds: number | null;
   width: number | null;
@@ -114,6 +197,7 @@ export type JobStatusValue =
   | "loading_model"
   | "transcribing"
   | "extracting_frames"
+  | "analyzing_visuals"
   | "generating_storyboards"
   | "generating_metadata"
   | "zipping"
@@ -316,6 +400,7 @@ export const PIPELINE_STEP_ORDER: { key: string; label: string }[] = [
   { key: "loading_model", label: "Loading transcription model" },
   { key: "transcribing", label: "Transcribing audio" },
   { key: "extracting_frames", label: "Extracting frames" },
+  { key: "analyzing_visuals", label: "Reading screen text & analyzing visuals" },
   { key: "generating_storyboards", label: "Building storyboards" },
   { key: "generating_metadata", label: "Generating metadata" },
   { key: "zipping", label: "Building ZIP archive" },

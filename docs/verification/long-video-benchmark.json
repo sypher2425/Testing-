@@ -1,0 +1,243 @@
+{
+  "ea463e9d-8033-4946-a571-9adade98a0fb": {
+    "video": {
+      "duration_seconds": 1708.640363,
+      "width": 2560,
+      "height": 1440,
+      "fps": 60,
+      "codec": "av1",
+      "has_audio": true
+    },
+    "frame_counts": {
+      "adaptive": 81,
+      "opening_dense": 32,
+      "key_events": 0
+    },
+    "extraction_report": [
+      {
+        "stage": "fetching_source",
+        "status": "success",
+        "started_at": "2026-09-04T16:21:53.864987+00:00",
+        "completed_at": "2026-09-04T16:25:45.353387+00:00",
+        "error": null
+      },
+      {
+        "stage": "probing",
+        "status": "success",
+        "started_at": "2026-09-04T16:25:45.381933+00:00",
+        "completed_at": "2026-09-04T16:25:45.488954+00:00",
+        "error": null
+      },
+      {
+        "stage": "loading_model",
+        "status": "success",
+        "started_at": "2026-09-04T16:25:45.513190+00:00",
+        "completed_at": "2026-09-04T16:25:45.535186+00:00",
+        "error": null
+      },
+      {
+        "stage": "transcribing",
+        "status": "success",
+        "started_at": "2026-09-04T16:25:45.560081+00:00",
+        "completed_at": "2026-09-04T16:36:44.336673+00:00",
+        "error": null
+      },
+      {
+        "stage": "extracting_frames",
+        "status": "success",
+        "started_at": "2026-09-04T16:36:44.366082+00:00",
+        "completed_at": "2026-09-04T16:48:40.986241+00:00",
+        "error": null
+      },
+      {
+        "stage": "generating_storyboards",
+        "status": "success",
+        "started_at": "2026-09-04T16:48:41.009062+00:00",
+        "completed_at": "2026-09-04T16:48:48.628841+00:00",
+        "error": null
+      }
+    ],
+    "processing": {
+      "started_at": "2026-09-04T16:21:53.834382+00:00",
+      "manifest_generated_at": "2026-09-04T16:48:48.689904+00:00",
+      "last_rebuilt_at": null
+    },
+    "stage_logs": [
+      {
+        "id": 280,
+        "timestamp": "2026-09-04T16:25:45.362183",
+        "level": "info",
+        "message": "Step finished: Fetching source video (231.5s)"
+      },
+      {
+        "id": 283,
+        "timestamp": "2026-09-04T16:25:45.495814",
+        "level": "info",
+        "message": "Step finished: Probing video (0.1s)"
+      },
+      {
+        "id": 286,
+        "timestamp": "2026-09-04T16:25:45.541790",
+        "level": "info",
+        "message": "Step finished: Loading transcription model (0.0s)"
+      },
+      {
+        "id": 289,
+        "timestamp": "2026-09-04T16:36:44.343762",
+        "level": "info",
+        "message": "Step finished: Transcribing audio (658.8s)"
+      },
+      {
+        "id": 294,
+        "timestamp": "2026-09-04T16:48:40.992356",
+        "level": "info",
+        "message": "Step finished: Extracting frames (716.7s)"
+      },
+      {
+        "id": 297,
+        "timestamp": "2026-09-04T16:48:48.635768",
+        "level": "info",
+        "message": "Step finished: Building storyboards (7.6s)"
+      },
+      {
+        "id": 300,
+        "timestamp": "2026-09-04T16:48:48.717546",
+        "level": "info",
+        "message": "Step finished: Generating metadata (0.1s)"
+      },
+      {
+        "id": 304,
+        "timestamp": "2026-09-04T16:48:50.622500",
+        "level": "info",
+        "message": "Step finished: Building ZIP archive (1.9s)"
+      }
+    ]
+  },
+  "7007f459-ff7d-4e64-8acf-0c399fe9c311": {
+    "video": {
+      "duration_seconds": 1708.566667,
+      "width": 2560,
+      "height": 1440,
+      "fps": 60,
+      "codec": "av1",
+      "has_audio": true
+    },
+    "frame_counts": {
+      "adaptive": 80,
+      "opening_dense": 32,
+      "key_events": 0
+    },
+    "extraction_report": [
+      {
+        "stage": "fetching_source",
+        "status": "success",
+        "started_at": "2026-09-05T23:56:20.635030+00:00",
+        "completed_at": "2026-09-05T23:56:20.649068+00:00",
+        "error": null
+      },
+      {
+        "stage": "probing",
+        "status": "success",
+        "started_at": "2026-09-05T23:56:20.669725+00:00",
+        "completed_at": "2026-09-05T23:56:20.795010+00:00",
+        "error": null
+      },
+      {
+        "stage": "loading_model",
+        "status": "success",
+        "started_at": "2026-09-05T23:56:20.813271+00:00",
+        "completed_at": "2026-09-05T23:56:22.398446+00:00",
+        "error": null
+      },
+      {
+        "stage": "transcribing",
+        "status": "success",
+        "started_at": "2026-09-05T23:56:22.415458+00:00",
+        "completed_at": "2026-09-05T23:56:51.255442+00:00",
+        "error": null
+      },
+      {
+        "stage": "extracting_frames",
+        "status": "success",
+        "started_at": "2026-09-05T23:56:51.273911+00:00",
+        "completed_at": "2026-09-06T00:01:13.204802+00:00",
+        "error": null
+      },
+      {
+        "stage": "analyzing_visuals",
+        "status": "success",
+        "started_at": "2026-09-06T00:01:13.224061+00:00",
+        "completed_at": "2026-09-06T00:01:13.250421+00:00",
+        "error": null
+      },
+      {
+        "stage": "generating_storyboards",
+        "status": "success",
+        "started_at": "2026-09-06T00:01:13.267313+00:00",
+        "completed_at": "2026-09-06T00:01:16.937327+00:00",
+        "error": null
+      }
+    ],
+    "processing": {
+      "started_at": "2026-09-05T23:56:20.609843+00:00",
+      "manifest_generated_at": "2026-09-06T00:01:16.974011+00:00",
+      "last_rebuilt_at": null
+    },
+    "stage_logs": [
+      {
+        "id": 1007,
+        "timestamp": "2026-09-05T23:56:20.649851",
+        "level": "info",
+        "message": "Step finished: Fetching source video (0.0s)"
+      },
+      {
+        "id": 1010,
+        "timestamp": "2026-09-05T23:56:20.795676",
+        "level": "info",
+        "message": "Step finished: Probing video (0.1s)"
+      },
+      {
+        "id": 1014,
+        "timestamp": "2026-09-05T23:56:22.399053",
+        "level": "info",
+        "message": "Step finished: Loading transcription model (1.6s)"
+      },
+      {
+        "id": 1017,
+        "timestamp": "2026-09-05T23:56:51.255907",
+        "level": "info",
+        "message": "Step finished: Transcribing audio (28.8s)"
+      },
+      {
+        "id": 1022,
+        "timestamp": "2026-09-06T00:01:13.205373",
+        "level": "info",
+        "message": "Step finished: Extracting frames (262.0s)"
+      },
+      {
+        "id": 1025,
+        "timestamp": "2026-09-06T00:01:13.250941",
+        "level": "info",
+        "message": "Step finished: Reading visual evidence (0.0s)"
+      },
+      {
+        "id": 1028,
+        "timestamp": "2026-09-06T00:01:16.937944",
+        "level": "info",
+        "message": "Step finished: Building storyboards (3.7s)"
+      },
+      {
+        "id": 1031,
+        "timestamp": "2026-09-06T00:01:16.990691",
+        "level": "info",
+        "message": "Step finished: Generating metadata (0.0s)"
+      },
+      {
+        "id": 1035,
+        "timestamp": "2026-09-06T00:01:17.125932",
+        "level": "info",
+        "message": "Step finished: Building ZIP archive (0.1s)"
+      }
+    ]
+  }
+}

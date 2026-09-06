@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import json
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -53,7 +54,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(
         status_code=422,
-        content={"error": {"code": "validation_error", "message": "Request validation failed", "detail": exc.errors()}},
+        content={"error": {"code": "validation_error", "message": "Request validation failed", "detail": json.loads(json.dumps(exc.errors(), default=str))}},
     )
 
 
@@ -68,6 +69,12 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "version": settings.APP_VERSION}
+
+
+@app.get("/api/capabilities")
+def local_capabilities() -> dict:
+    from app.utils.runtime_capabilities import capabilities
+    return capabilities()
 
 
 @app.get("/api/health/extraction")

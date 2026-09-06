@@ -43,7 +43,7 @@ def test_streaming_upload_creates_job(client, data_dir):
 
     payload = b"fake mp4 bytes" * 500
     with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
-        "app.tasks.process_job.delay"
+        "app.tasks.process_job.apply_async"
     ) as mock_delay:
         resp = client.post(
             "/api/jobs/upload?filename=clip.mp4&mode=adaptive",
@@ -52,7 +52,7 @@ def test_streaming_upload_creates_job(client, data_dir):
         )
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
-    mock_delay.assert_called_once_with(job_id, retry=False)
+    mock_delay.assert_called_once_with(args=(job_id,), retry=False)
 
     status = client.get(f"/api/jobs/{job_id}").json()
     assert status["status"] == "queued"
@@ -187,7 +187,7 @@ def test_multipart_route_still_works_and_rejects_by_content_length(client):
     """The multipart route stays for URL jobs and small files, and now returns
     a real 413 instead of a 422 for oversized declarations."""
     with patch("app.api.routes.jobs.ffprobe", return_value=FAKE_PROBE), patch(
-        "app.tasks.process_job.delay"
+        "app.tasks.process_job.apply_async"
     ):
         resp = client.post(
             "/api/jobs",

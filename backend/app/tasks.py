@@ -4,7 +4,7 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
-from celery.signals import task_failure, worker_ready
+from celery.signals import task_failure, worker_process_init, worker_ready
 
 from app.celery_app import celery_app
 from app.config import get_settings
@@ -165,6 +165,8 @@ def cleanup_expired_jobs() -> int:
 
     if deleted:
         logger.info("Retention cleanup removed %d expired job(s)", deleted)
+    from app.utils.cache_cleanup import cleanup_processing_caches
+    cleanup_processing_caches(settings)
     return deleted
 
 
@@ -334,8 +336,7 @@ def _warm_whisper_model() -> None:
 
 @worker_ready.connect
 def _on_worker_ready(**_kwargs) -> None:
-    """Runs once per worker boot: recover stranded jobs, then warm the model."""
-    settings = get_settings()
+    """Runs once in Celery's parent process to recover jobs and check tools."""
     try:
         outcome = recover_interrupted_jobs()
         if outcome["requeued"] or outcome["failed"]:
@@ -356,8 +357,24 @@ def _on_worker_ready(**_kwargs) -> None:
     except Exception as exc:  # noqa: BLE001 - never block worker startup
         logger.error("yt-dlp startup check failed: %s", exc)
 
-    if settings.WARM_MODEL_ON_STARTUP:
-        # Background thread so the worker starts accepting jobs immediately.
+
+
+@worker_process_init.connect
+def _on_worker_process_init(**_kwargs) -> None:
+    """Initialize Whisper inside each pool child, never in the parent.
+
+    faster-whisper uses CTranslate2 native state that can deadlock when a model
+    is constructed before Celery forks and then decoded inside a child.
+    """
+    from app.pipeline.steps.load_model import clear_model_cache
+
+    clear_model_cache()
+    from app.utils.runtime_capabilities import publish_worker_capabilities
+    threading.Thread(target=publish_worker_capabilities, daemon=True, name="worker-capabilities").start()
+    if get_settings().WARM_MODEL_ON_STARTUP:
+        # Do not block Celery's process-init signal during a first-time model
+        # download. load_whisper_model's lock makes the first job wait for this
+        # same instance rather than constructing a second one.
         threading.Thread(target=_warm_whisper_model, daemon=True, name="model-warmup").start()
 
 

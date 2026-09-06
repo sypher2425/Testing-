@@ -1,4 +1,5 @@
 import type {
+  AnalysisTimeline,
   CreateJobOptions,
   CreateJobResponse,
   CreateResearchJobParams,
@@ -12,6 +13,7 @@ import type {
   Manifest,
   ManualPerformanceOverrides,
   ResearchManifest,
+  RuntimeCapabilities,
   StoryboardManifest,
   TranscriptJSON,
   TranscriptManifest,
@@ -30,7 +32,7 @@ function uploadApiBaseUrl(): string {
 const OPTION_DEFAULTS: CreateJobOptions = {
   mode: "adaptive",
   interval_ms: 1000,
-  target_frames: 80,
+  target_frames: 300,
   frame_format: "jpeg",
   frame_max_dim: 1280,
 };
@@ -45,9 +47,14 @@ function boundedInteger(value: number, fallback: number, min: number, max: numbe
 export function normalizeCreateJobOptions(options: CreateJobOptions): CreateJobOptions {
   const normalized: CreateJobOptions = {
     ...options,
-    interval_ms: boundedInteger(options.interval_ms, OPTION_DEFAULTS.interval_ms, 100, 86_400_000),
-    target_frames: boundedInteger(options.target_frames, OPTION_DEFAULTS.target_frames, 30, 150),
+    interval_ms: boundedInteger(options.interval_ms, OPTION_DEFAULTS.interval_ms, 17, 86_400_000),
+    target_frames: boundedInteger(options.target_frames, OPTION_DEFAULTS.target_frames, 30, 2000),
     frame_max_dim: boundedInteger(options.frame_max_dim, OPTION_DEFAULTS.frame_max_dim, 64, 7680),
+    frame_budget: boundedInteger(options.frame_budget ?? 2000, 2000, 30, 20000),
+    processing_profile: options.processing_profile ?? "balanced",
+    source_preference: options.source_preference ?? "captions_first",
+    analysis_objective: (options.analysis_objective ?? "").slice(0, 2000),
+    frame_bursts: options.mode === "every_frame" ? [] : options.frame_bursts,
   };
   if (options.storyboard_columns !== undefined) {
     normalized.storyboard_columns = boundedInteger(options.storyboard_columns, 5, 2, 10);
@@ -56,6 +63,16 @@ export function normalizeCreateJobOptions(options: CreateJobOptions): CreateJobO
     normalized.storyboard_tiles_per_sheet = boundedInteger(options.storyboard_tiles_per_sheet, 24, 4, 60);
   }
   return normalized;
+}
+
+const OPTIONAL_JOB_FIELDS = [
+  "storyboard_enabled", "storyboard_columns", "storyboard_tiles_per_sheet", "storyboard_include_captions",
+  "processing_profile", "source_preference", "frame_budget", "range_start_seconds", "range_end_seconds",
+  "analysis_objective", "ocr_enabled", "vision_enabled", "frame_bursts",
+] as const;
+
+function encodedOption(value: unknown): string {
+  return Array.isArray(value) ? JSON.stringify(value) : String(value);
 }
 
 export class ApiError extends Error {
@@ -101,9 +118,9 @@ async function handleResponse<T>(res: Response): Promise<T> {
     }
     throw new ApiError(
       res.status,
-      envelope?.error.code ?? "unknown_error",
-      envelope?.error.message ?? res.statusText,
-      envelope?.error.detail
+      envelope?.error?.code ?? "unknown_error",
+      envelope?.error?.message ?? res.statusText,
+      envelope?.error?.detail
     );
   }
   return (await res.json()) as T;
@@ -145,14 +162,9 @@ export async function createJob(
       frame_format: safeOptions.frame_format,
       frame_max_dim: String(safeOptions.frame_max_dim),
     });
-    for (const key of [
-      "storyboard_enabled",
-      "storyboard_columns",
-      "storyboard_tiles_per_sheet",
-      "storyboard_include_captions",
-    ] as const) {
+    for (const key of OPTIONAL_JOB_FIELDS) {
       const value = safeOptions[key];
-      if (value !== undefined) params.set(key, String(value));
+      if (value !== undefined && value !== null) params.set(key, encodedOption(value));
     }
     if (manualOverrides) {
       for (const [key, value] of Object.entries(manualOverrides)) {
@@ -171,14 +183,9 @@ export async function createJob(
     formData.append("target_frames", String(safeOptions.target_frames));
     formData.append("frame_format", safeOptions.frame_format);
     formData.append("frame_max_dim", String(safeOptions.frame_max_dim));
-    for (const key of [
-      "storyboard_enabled",
-      "storyboard_columns",
-      "storyboard_tiles_per_sheet",
-      "storyboard_include_captions",
-    ] as const) {
+    for (const key of OPTIONAL_JOB_FIELDS) {
       const value = safeOptions[key];
-      if (value !== undefined) formData.append(key, String(value));
+      if (value !== undefined && value !== null) formData.append(key, encodedOption(value));
     }
     if (manualOverrides) {
       for (const [key, value] of Object.entries(manualOverrides)) {
@@ -275,6 +282,24 @@ export async function listJobs(page = 1, pageSize = 20): Promise<JobListResponse
 export async function getJob(jobId: string): Promise<JobStatusResponse> {
   const res = await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}`, { cache: "no-store" });
   return handleResponse<JobStatusResponse>(res);
+}
+
+export async function getCapabilities(): Promise<RuntimeCapabilities> {
+  return handleResponse<RuntimeCapabilities>(await apiFetch(`${API_BASE_URL}/api/capabilities`, { cache: "no-store" }));
+}
+
+export async function getAnalysis(jobId: string): Promise<AnalysisTimeline> {
+  return handleResponse<AnalysisTimeline>(await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}/analysis`, { cache: "no-store" }));
+}
+
+export function analysisReportUrl(jobId: string, format: "md" | "txt" | "json" = "txt"): string {
+  return `${API_BASE_URL}/api/jobs/${jobId}/analysis/report?format=${format}`;
+}
+
+export async function reanalyzeJob(jobId: string, options: Pick<CreateJobOptions, "processing_profile" | "analysis_objective" | "ocr_enabled" | "vision_enabled">): Promise<CreateJobResponse> {
+  return handleResponse<CreateJobResponse>(await apiFetch(`${API_BASE_URL}/api/jobs/${jobId}/reanalyze`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options),
+  }));
 }
 
 export async function cancelOrDeleteJob(jobId: string): Promise<void> {

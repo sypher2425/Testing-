@@ -102,6 +102,7 @@ class FetchSourceStep(PipelineStep):
             "platform_post_id": canonical.post_id,
         }
 
+        ctx.shared["caption_metadata"] = metadata
         ctx.info(f"Resolved source URL via yt-dlp: platform={metadata.platform}, title={metadata.title!r}")
         missing = [
             field

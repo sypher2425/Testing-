@@ -36,6 +36,7 @@ from app.schemas import (
     FrameListResponse,
     JobListResponse,
     JobStatusResponse,
+    ReanalyzeRequest,
 )
 from app.storage import get_storage
 from app.storage.base import StorageBackend
@@ -60,6 +61,10 @@ AI_DATASET_COMMON_FILES = (
     "analytics/performance.json",
     "comments/top_comments.json",
     "comments/extraction_status.json",
+    "analysis/timeline.json",
+    "analysis/report.md",
+    "analysis/report.txt",
+    "metadata/frames.json",
 )
 
 _CONTENT_TYPES = {
@@ -152,6 +157,20 @@ def _parse_options(**kwargs) -> CreateJobOptions:
         ) from exc
 
 
+async def _enhanced_video_options(request: Request) -> dict:
+    """Shared advanced controls for raw streaming and multipart ingestion."""
+    values = request.query_params if request.url.path.endswith("/upload") else await request.form()
+    keys = ("processing_profile", "source_preference", "frame_budget", "range_start_seconds",
+            "range_end_seconds", "analysis_objective", "ocr_enabled", "vision_enabled")
+    result = {key: values[key] for key in keys if key in values and values[key] != ""}
+    if values.get("frame_bursts"):
+        try:
+            result["frame_bursts"] = json.loads(str(values["frame_bursts"]))
+        except ValueError as exc:
+            raise unprocessable("frame_bursts must be a JSON array") from exc
+    return result
+
+
 def _parse_events(events: str | None) -> list:
     if not events:
         return []
@@ -187,7 +206,11 @@ def _enqueue(db: Session, job_id: str) -> None:
     from app.tasks import process_job
 
     try:
-        process_job.delay(job_id, retry=False)
+        # ``delay`` forwards every keyword to the task function itself. Passing
+        # ``retry=False`` there therefore crashes a bound task whose only real
+        # argument is ``job_id``. ``apply_async`` is the Celery API that accepts
+        # producer-side publish options such as ``retry``.
+        process_job.apply_async(args=(job_id,), retry=False)
     except (OperationalError, OSError) as exc:
         db.query(Job).filter(Job.id == job_id).delete()
         db.commit()
@@ -282,7 +305,7 @@ async def create_job_from_stream(
     filename: str = Query(..., description="Original filename; supplies the extension and display name"),
     mode: str = Query("adaptive"),
     interval_ms: int = Query(1000),
-    target_frames: int = Query(80),
+    target_frames: int = Query(300),
     frame_format: str = Query("jpeg"),
     frame_max_dim: int = Query(1280),
     opening_dense_enabled: bool = Query(True),
@@ -302,6 +325,7 @@ async def create_job_from_stream(
     manual_comment_count: int | None = Query(None),
     manual_share_count: int | None = Query(None),
     manual_hashtags: str | None = Query(None),
+    enhanced_options: dict = Depends(_enhanced_video_options),
     db: Session = Depends(db_session),
     settings: Settings = Depends(get_settings),
     storage: StorageBackend = Depends(get_storage),
@@ -328,6 +352,7 @@ async def create_job_from_stream(
         storyboard_columns=storyboard_columns,
         storyboard_tiles_per_sheet=storyboard_tiles_per_sheet,
         storyboard_include_captions=storyboard_include_captions,
+        **enhanced_options,
     )
     parsed_events = _parse_events(events)
     if not filename.strip():
@@ -421,7 +446,7 @@ async def create_job(
     url: str | None = Form(None),
     mode: str = Form("adaptive"),
     interval_ms: int = Form(1000),
-    target_frames: int = Form(80),
+    target_frames: int = Form(300),
     frame_format: str = Form("jpeg"),
     frame_max_dim: int = Form(1280),
     manual_title: str | None = Form(None),
@@ -441,6 +466,7 @@ async def create_job(
     storyboard_tiles_per_sheet: int | None = Form(None),
     storyboard_include_captions: bool = Form(True),
     events: str | None = Form(None),
+    enhanced_options: dict = Depends(_enhanced_video_options),
     db: Session = Depends(db_session),
     settings: Settings = Depends(get_settings),
     storage: StorageBackend = Depends(get_storage),
@@ -458,6 +484,7 @@ async def create_job(
         storyboard_columns=storyboard_columns,
         storyboard_tiles_per_sheet=storyboard_tiles_per_sheet,
         storyboard_include_captions=storyboard_include_captions,
+        **enhanced_options,
     )
     parsed_events = _parse_events(events)
 
@@ -946,6 +973,54 @@ async def job_events(job_id: str, db: Session = Depends(db_session)) -> Streamin
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@router.post("/{job_id}/reanalyze", response_model=CreateJobResponse, status_code=202)
+def reanalyze_existing(
+    job_id: str, request: ReanalyzeRequest,
+    db: Session = Depends(db_session), storage: StorageBackend = Depends(get_storage),
+):
+    original = _get_job_or_404(db, job_id)
+    if original.status != "completed" or original.job_type != "video":
+        raise unprocessable("Only completed video datasets can reuse their frames for analysis")
+    if not storage.exists(f"{job_id}/metadata/frames.json") or not storage.exists(f"{job_id}/manifest.json"):
+        raise not_found("The original frames or manifest are no longer available")
+    options = dict(original.options or {})
+    options.update(request.model_dump(exclude_unset=True))
+    options["reuse_job_id"] = job_id
+    new_id = str(uuid.uuid4())
+    job = Job(id=new_id, job_type="video", original_filename=original.original_filename,
+              stored_source_filename=original.stored_source_filename, status="queued", current_step="queued",
+              mode=original.mode, options=options, source_url=original.source_url,
+              source_sha256=original.source_sha256, file_size_bytes=original.file_size_bytes,
+              performance=original.performance, step_progress={}, last_heartbeat=datetime.now(timezone.utc))
+    db.add(job)
+    db.commit()
+    _enqueue(db, new_id)
+    return CreateJobResponse(job_id=new_id)
+
+
+@router.get("/{job_id}/analysis")
+def get_analysis(job_id: str, db: Session = Depends(db_session), storage: StorageBackend = Depends(get_storage)):
+    _get_job_or_404(db, job_id)
+    relative = f"{job_id}/analysis/timeline.json"
+    if not storage.exists(relative):
+        raise not_found("No visual analysis is available for this job yet")
+    return FileResponse(storage.get(relative), media_type="application/json")
+
+
+@router.get("/{job_id}/analysis/report")
+def download_analysis_report(
+    job_id: str, format: str = Query("txt", pattern="^(md|txt|json)$"),
+    db: Session = Depends(db_session), storage: StorageBackend = Depends(get_storage),
+):
+    _get_job_or_404(db, job_id)
+    name = "timeline.json" if format == "json" else f"report.{format}"
+    relative = f"{job_id}/analysis/{name}"
+    if not storage.exists(relative):
+        raise not_found("This report is not available yet")
+    media = {"json": "application/json", "md": "text/markdown", "txt": "text/plain"}[format]
+    return FileResponse(storage.get(relative), media_type=media, filename=f"frame-ai-{job_id[:8]}.{format}")
+
+
 @router.get("/{job_id}/transcript")
 def get_transcript(
     job_id: str,
@@ -1291,12 +1366,7 @@ def _storyboard_entries(
 
 
 def _zip_ai_dataset(job_id: str, storage: StorageBackend, visuals: str) -> Response:
-    """Build a minimal analysis bundle from an explicit allowlist.
-
-    Frames and adaptive storyboards are intentionally mutually exclusive.
-    Internal manifests, events, validation/metadata, duplicate transcript
-    formats, source captions, and legacy compatibility files never enter it.
-    """
+    """Bundle the chosen overview plus readable and structured evidence."""
     entries = [
         rel for rel in AI_DATASET_COMMON_FILES if storage.exists(f"{job_id}/{rel}")
     ]
@@ -1310,6 +1380,26 @@ def _zip_ai_dataset(job_id: str, storage: StorageBackend, visuals: str) -> Respo
         if not adaptive_sheets:
             raise not_found("No adaptive storyboard sheets found")
         entries.extend(adaptive_sheets)
+        # Supply full-resolution evidence for observations, without copying
+        # every sampled frame into an overview-oriented download.
+        timeline_path = storage.get(f"{job_id}/analysis/timeline.json")
+        if timeline_path.is_file():
+            try:
+                timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+                items = timeline.get("items") if isinstance(timeline, dict) else None
+                for item in items if isinstance(items, list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    ocr = item.get("ocr")
+                    vision = item.get("vision")
+                    evidence = (isinstance(ocr, dict) and bool(ocr.get("lines"))) or (isinstance(vision, dict) and vision.get("status") == "success")
+                    relative = item.get("source_frame")
+                    if evidence and isinstance(relative, str) and relative.startswith("frames/") and is_safe_relative_path(relative):
+                        frame_path = storage.get(f"{job_id}/{relative}")
+                        if frame_path.is_file() and frame_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} and relative not in entries:
+                            entries.append(relative)
+            except (OSError, ValueError):
+                pass
         label = "adaptive-storyboards"
 
     return _zip_subset(
@@ -1357,9 +1447,11 @@ def _zip_subset(job_id: str, storage: StorageBackend, rel_entries: list[str], do
                     for fname in files:
                         fpath = os.path.join(root, fname)
                         arcname = os.path.relpath(fpath, job_root)
-                        zf.write(fpath, arcname)
+                        compressed = arcname.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".webm"))
+                        zf.write(fpath, arcname, compress_type=zipfile.ZIP_STORED if compressed else zipfile.ZIP_DEFLATED)
             elif full.is_file():
-                zf.write(full, entry)
+                compressed = entry.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".webm"))
+                zf.write(full, entry, compress_type=zipfile.ZIP_STORED if compressed else zipfile.ZIP_DEFLATED)
     return FileResponse(
         tmp.name,
         media_type="application/zip",

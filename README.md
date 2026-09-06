@@ -1,18 +1,23 @@
-# Video → AI-Ready Dataset
+# Frame AI — Video → AI-Ready Dataset
 
 Turn an uploaded video into a self-describing, AI-ready dataset — transcript,
 representative frames, and a `manifest.json` an LLM can read to understand the
-whole bundle without opening anything else. **Adaptive frame selection** is
-the flagship extraction mode: it aims for a small, representative set of
-frames (30-150) rather than exhaustively dumping every frame, because the
-dataset is meant to fit inside a model's context window.
+whole bundle without opening anything else. Version 0.2 adds GPU transcription
+and decoding, budgeted adaptive sampling, up to 60 FPS for selected ranges,
+local OCR and optional local visual AI, searchable evidence, and reusable analysis.
+Adaptive mode defaults to 300 representative frames with a configurable target
+of 30–2,000. Interval extraction supports a main frame budget up to 20,000.
+
+See [local AI setup and usage](docs/LOCAL_AI.md) and the
+[implementation and benchmark report](docs/FRAME_AI_UPGRADE_REPORT.md).
 
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose v2
-- ~4GB free disk for Docker images (faster-whisper + PySceneDetect/OpenCV pull
-  in a fair amount of Python tooling) plus space for job artifacts
-- No GPU required — transcription runs on CPU by default
+- Space for Docker images, model weights and job artifacts; the optional
+  Qwen visual model alone downloads about 3.4 GB
+- The default Compose override enables NVIDIA GPUs. For CPU-only machines,
+  use `docker compose -f docker-compose.yml up --build` and `ENABLE_CUDA=false`
 
 ## One-command startup
 
@@ -173,8 +178,8 @@ filename, video properties, detected language, extraction mode + params,
 per-category frame counts, `source_video_sha256`, an `extraction_report`
 (status + timing per stage), a `posting_context` block, a machine-readable
 `analysis_summary` for cross-video comparison, every file with a relative
-path + description, and a reserved `analyses` section for future AI outputs
-(OCR, object detection, embeddings) — see
+path + description, and an `analyses` section with local OCR and optional
+visual observations. Timestamped reports live in `analysis/` — see
 [Extending the pipeline](#extending-the-pipeline).
 
 **The dataset never fabricates data.** Any metric that can't be extracted is
@@ -329,10 +334,10 @@ contradictions are *errors* on freshly generated (≥2.2) datasets and
 | `invalid_entry_method` / `invalid_status` / `invalid_precision` / `silent_zero` | vocabulary violations |
 | `missing_schema_version` / `missing_source_dir` / `missing_performance_snapshot` / `identity_inconsistent` / `audio_wpm_ordering` / `nested_dataset` | pre-existing checks, unchanged |
 
-**Explicitly excluded from this round** (deferred to Round 2): enrichment
-UI, OCR, AI/Gemini integration, automatic event detection, retention
-estimation, comment summarization, demographic import, and adaptive-frame
-perceptual deduplication.
+**Historical Round 1 scope:** enrichment, OCR and visual AI were deferred.
+Version 0.2 now includes local OCR, local visual AI and adaptive novelty
+selection; retention estimation, comment summarization and demographic
+import remain future work.
 
 ## Storyboards
 
@@ -473,10 +478,10 @@ All responses are JSON. Errors use a consistent envelope:
 
 | Mode | Behavior |
 |---|---|
-| `adaptive` (default) | PySceneDetect content-aware scene detection targeting 30-150 frames (`target_frames`). Too few scenes → falls back to interval sampling to hit the minimum. Too many → keeps the highest-content-change scenes. |
-| `interval` | One frame every `interval_ms` (min 100ms) |
+| `adaptive` (default) | FFmpeg novelty preview with timeline coverage; 30–2,000 target frames and profile-dependent scan density. |
+| `interval` | Requested frame spacing down to 17ms, bounded by source FPS and the main frame budget. |
 | `per_second` | One frame per second |
-| `every_frame` | Every decoded frame, hard-capped at `MAX_FRAMES` (default 2000). Videos that would exceed the cap are rejected with a message suggesting `adaptive` instead — the job fails cleanly rather than the worker choking on it. |
+| `every_frame` | Every decoded source frame, including variable-rate timing, within the selected range. Jobs exceeding the main frame budget are rejected with guidance to shorten the range or use interval sampling. Global maximum: 20,000 main frames. |
 
 ## URL ingestion (YouTube, TikTok, Instagram)
 
@@ -852,10 +857,10 @@ See `.env.example` for the full annotated list. Highlights:
 | `STORYBOARD_THEME` | dark | `dark` or `light` sheet chrome |
 | `STORYBOARD_TIMELINE_INTERVAL_SECONDS` | 1.0 | Target spacing for the uniform timeline sheet |
 | `STORYBOARD_KEY_MOMENTS_MAX` | 24 | Cap for the key-moments summary (also bounded to one sheet) |
-| `WHISPER_MODEL_SIZE` | small | faster-whisper model; CPU-only unless `WHISPER_DEVICE=cuda` |
+| `WHISPER_MODEL_SIZE` | small | faster-whisper model; example environment uses automatic CUDA with CPU fallback |
 | `ENABLE_DIARIZATION` | false | See [Diarization](#optional-speaker-diarization) below |
-| `MAX_FRAMES` | 2000 | Hard cap for `every_frame`; soft cap (with a warning) for other modes |
-| `ADAPTIVE_MIN_FRAMES` / `ADAPTIVE_MAX_FRAMES` | 30 / 150 | Bounds for adaptive mode's target frame count |
+| `MAX_FRAMES` | 20000 | Global main-frame ceiling; per-job budget defaults to 2,000. Bursts share this budget; opening/event groups are additional and separately bounded. |
+| `ADAPTIVE_MIN_FRAMES` / `ADAPTIVE_MAX_FRAMES` | 30 / 2000 | Bounds for adaptive mode's target frame count; default target 300 |
 | `RETENTION_HOURS` | 72 | Jobs + artifacts are deleted this many hours after completion by a periodic Celery task |
 | `YTDLP_COMMENT_LIMIT` | 100 | Top comments (by likes) saved per URL-ingested job (`MAX_COMMENTS` accepted as an alias) |
 | `TIKTOK_DEVICE_ID` | (unset) | Switches TikTok to its mobile API instead of scraping the web page. Get it from the TikTok app: Settings → scroll to the bottom → tap the version number 5×. See [TikTok extraction](#tiktok-extraction) |
@@ -958,11 +963,9 @@ To wire it in:
 4. Add the step name/label to `PIPELINE_STEP_ORDER` in
    `frontend/lib/types.ts` so the Processing view's step indicator shows it.
 
-This is the intended path for OCR on frames, object detection, scene
-classification, LLM summaries, auto-tagging, embeddings + semantic search,
-duplicate-frame removal, and keyword extraction — none of which are built in
-v1, but the pipeline is shaped so adding them doesn't require touching the API
-or frontend beyond the manifest/step-label wiring above.
+Version 0.2 implements this extension path for local OCR and visual observations.
+Object detection, embeddings and semantic search can use the same pipeline;
+new user-facing controls or output views may also require API and frontend changes.
 
 ## Regenerating frontend types from the API
 

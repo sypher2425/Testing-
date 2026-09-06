@@ -1,0 +1,18 @@
+[
+  {
+    "mode": "frames",
+    "entries": 70,
+    "frames": 62,
+    "sheets": 0,
+    "all_evidence_images_present": true,
+    "report_includes_speech_ocr_vision": true
+  },
+  {
+    "mode": "storyboards",
+    "entries": 71,
+    "frames": 61,
+    "sheets": 2,
+    "all_evidence_images_present": true,
+    "report_includes_speech_ocr_vision": true
+  }
+]

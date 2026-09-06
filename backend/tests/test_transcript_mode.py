@@ -432,7 +432,7 @@ def _completed_transcript_job(client) -> str:
     from app.database import get_session
     from app.models import Job
 
-    with patch("app.tasks.process_job.delay"):
+    with patch("app.tasks.process_job.apply_async"):
         job_id = client.post(
             "/api/jobs/transcript", json={"url": "https://www.tiktok.com/@x/video/123"}
         ).json()["job_id"]
@@ -447,14 +447,14 @@ def _completed_transcript_job(client) -> str:
 
 
 def test_create_transcript_job_enqueues_and_records_its_options(client):
-    with patch("app.tasks.process_job.delay") as mock_delay:
+    with patch("app.tasks.process_job.apply_async") as mock_delay:
         resp = client.post(
             "/api/jobs/transcript",
             json={"url": "https://www.tiktok.com/@x/video/123", "language": "es"},
         )
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
-    mock_delay.assert_called_once_with(job_id, retry=False)
+    mock_delay.assert_called_once_with(args=(job_id,), retry=False)
 
     body = client.get(f"/api/jobs/{job_id}").json()
     assert body["job_type"] == "transcript"
@@ -633,7 +633,7 @@ def test_upload_route_accepts_audio_only_files(client):
     import io
 
     with patch("app.api.routes.jobs.ffprobe", return_value=_probe()), patch(
-        "app.tasks.process_job.delay"
+        "app.tasks.process_job.apply_async"
     ) as mock_delay:
         resp = client.post(
             "/api/jobs/transcript/upload?filename=voice-memo.mp3",
@@ -642,7 +642,7 @@ def test_upload_route_accepts_audio_only_files(client):
         )
     assert resp.status_code == 202, resp.text
     job_id = resp.json()["job_id"]
-    mock_delay.assert_called_once_with(job_id, retry=False)
+    mock_delay.assert_called_once_with(args=(job_id,), retry=False)
 
     body = client.get(f"/api/jobs/{job_id}").json()
     assert body["job_type"] == "transcript"

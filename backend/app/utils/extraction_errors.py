@@ -170,7 +170,13 @@ _MARKERS: list[tuple[str, tuple[str, ...]]] = [
     (DEPENDENCY_MISSING, ("yt-dlp is not installed", "no such file or directory: 'yt-dlp'")),
     # The rehydration failure: TikTok's page carried no embedded data. Kept
     # after the specific markers so a private/removed video is never mislabelled.
-    (LAYOUT_CHANGED, ("universal data for rehydration", "unable to extract webpage video data")),
+    (
+        LAYOUT_CHANGED,
+        (
+            "universal data for rehydration",
+            "unable to extract webpage video data",
+        ),
+    ),
 ]
 
 _TERMINAL = {VIDEO_PRIVATE, VIDEO_UNAVAILABLE}
@@ -202,9 +208,8 @@ def classify(stderr: str, *, used_cookies: bool = False) -> Classification:
 def reconcile(authenticated: Classification, anonymous: Classification | None) -> Classification:
     """Combine the two attempts into one verdict.
 
-    This is the part stderr alone cannot give you: identical failures with and
-    without cookies rule the cookies out, which turns a vague "maybe your
-    session expired" into a specific statement about the server's IP.
+    Matching failures with and without cookies show that refreshing the cookies
+    alone is unlikely to help. They do not establish an IP or regional block.
     """
     if anonymous is None:
         return authenticated

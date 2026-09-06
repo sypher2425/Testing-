@@ -2,6 +2,7 @@
 across sequential jobs, and must explain every abnormal exit."""
 import time
 import uuid
+import os
 from unittest.mock import patch
 
 import pytest
@@ -157,6 +158,24 @@ def test_load_model_step_loads_once_and_reuses(tmp_path):
             LoadWhisperModelStep().run(ctx)
 
     assert FakeModel.construction_count == 1, "model must be reused across sequential jobs"
+
+
+def test_load_model_rejects_a_model_inherited_from_another_process():
+    """A native model created before Celery forks must never be used by the
+    child process; doing so can leave decoding idle forever."""
+    from app.pipeline.steps import load_model
+
+    settings = get_settings()
+    key = load_model._cache_key(settings)
+    inherited_model = object()
+    load_model._model_cache[key] = (os.getpid() + 1, inherited_model)
+
+    with patch("faster_whisper.WhisperModel", FakeModel):
+        model = load_model.load_whisper_model()
+
+    assert model is not inherited_model
+    assert isinstance(model, FakeModel)
+    assert FakeModel.construction_count == 1
 
 
 def test_load_model_timeout_produces_typed_failure(tmp_path):
@@ -544,43 +563,17 @@ def test_zip_step_heartbeats_during_the_archive(tmp_path):
 
 
 def test_scene_detection_heartbeats(tmp_path):
-    """Detection decodes the whole video with no progress of its own — far
-    longer than STALE_JOB_TIMEOUT_MINUTES on a large source."""
+    """The FFmpeg prescan gets live cancellation and heartbeat callbacks."""
     from app.pipeline.steps import extract_frames as ef
     from tests.test_pipeline_steps import make_ctx
 
     ctx, _, _ = make_ctx(tmp_path)
+    ctx.shared["video"] = {"duration_seconds": 10.0}
     beats: list[int] = []
     ctx.heartbeat = lambda: beats.append(1)
 
-    class FakeSceneManager:
-        def __init__(self, *a, **k):
-            pass
-
-        def add_detector(self, detector):
-            pass
-
-        def detect_scenes(self, video, show_progress=False):
-            pass
-
-        def get_scene_list(self):
-            return []
-
-    fake_scenedetect = type(
-        "M",
-        (),
-        {
-            "SceneManager": FakeSceneManager,
-            "StatsManager": lambda *a, **k: None,
-            "open_video": lambda path: object(),
-        },
-    )
-    fake_detectors = type("D", (), {"ContentDetector": lambda *a, **k: None})
-
-    with patch.dict(
-        "sys.modules",
-        {"scenedetect": fake_scenedetect, "scenedetect.detectors": fake_detectors},
-    ), patch.object(ef, "HeartbeatTicker") as ticker:
+    with patch.object(ef, "decode_frames", return_value=[]) as decoder:
         ef._detect_scenes("/tmp/whatever.mp4", ctx)
-    assert ticker.call_count == 1
-    assert ticker.call_args.args[1] == ctx.heartbeat
+    assert decoder.call_count == 1
+    assert decoder.call_args.kwargs["heartbeat"] == ctx.heartbeat
+    assert decoder.call_args.kwargs["check_cancel"] == ctx.check_cancel
